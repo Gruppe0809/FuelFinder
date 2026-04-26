@@ -1,0 +1,7 @@
+requests
+python-dotenv
+pandas
+folium
+geopy
+rich
+tabulate
