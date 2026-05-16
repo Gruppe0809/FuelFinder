@@ -1,7 +1,8 @@
-requests
-python-dotenv
-pandas
+streamlit
+streamlit-folium
+streamlit-searchbox
 folium
+requests
+pandas
 geopy
-rich
-tabulate
+python-dotenv
