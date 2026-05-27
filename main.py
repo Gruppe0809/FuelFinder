@@ -1,84 +1,78 @@
 """
-FuelFinder v2 — Streamlit web app for live fuel-price comparison and trip planning.
+FuelFinder - Streamlit web app for comparing live fuel prices in Germany, Austria and Switzerland.
 
-The app has two modes:
-  1. "Find nearby"   — enter a location and radius, see the cheapest stations on a map
-  2. "Trip planner"  — enter start/destination, the app finds the optimal refuel stops
+Mode 1 (Find nearby): type a location, choose a radius, see a map with the cheapest stations.
+Mode 2 (Trip planner): enter start + destination, we find the cheapest stops along the route.
 
-Data sources:
-  - Germany  : Tankerkoenig API  (requires free API key)
-  - Austria  : E-Control / Spritpreisrechner.at API  (no key needed)
-  - Switzerland : OpenStreetMap Overpass API  (no key needed, locations only — no prices)
-
-Maps & routing powered by Mapbox (free tier).
-
-Run locally:
-    pip install -r requirements.txt
-    cp .env.example .env       # fill in your API keys
-    streamlit run main.py      # opens http://localhost:8501
-
-Project: HSG "Programming - Introduction Level", Group 4495.
+Run with: streamlit run main.py
+HSG Programming - Introduction Level, Group 4495
 """
 
 # ===========================================================================
 # 1. IMPORTS & SETUP
 # ===========================================================================
 
-import math                           # for haversine distance formula
-import os                             # for reading environment variables
-from concurrent.futures import ThreadPoolExecutor, as_completed  # parallel API calls
-from dataclasses import dataclass, field  # for clean data container classes
-from typing import Optional           # for type hints (Optional = value or None)
+# these are all the external libraries we need
+# each one needs to be installed with pip (see requirements.txt)
 
-import certifi                       # trusted SSL certificate bundle (fixes macOS SSL issues)
-import folium                        # interactive map rendering
-import pandas as pd                  # data tables
-import requests                      # HTTP calls to all external APIs
-import streamlit as st               # the web app framework
-from dotenv import load_dotenv       # reads API keys from the .env file
-from geopy.geocoders import Nominatim  # fallback geocoder if Mapbox is unavailable
-from streamlit_folium import st_folium  # embeds folium maps inside Streamlit
-from streamlit_searchbox import st_searchbox  # address autocomplete search box widget
-from urllib.parse import quote as url_quote   # URL-encodes strings for API requests
+import math                           # standard Python math library - we use it for the distance formula
+import os                             # lets us read environment variables like API keys
+from concurrent.futures import ThreadPoolExecutor, as_completed  # for running multiple API calls at the same time (parallel)
+from dataclasses import dataclass, field  # dataclass is a Python feature that makes it easier to define simple data containers
+from typing import Optional           # Optional[X] means a variable can be either type X or None
 
-# macOS Python (installed from python.org) ships without system SSL certificates.
-# Pointing requests at certifi's own bundle fixes "SSL certificate verify failed" errors.
+import certifi                        # provides SSL certificates so HTTPS requests work on macOS
+import folium                         # library for creating interactive maps (uses Leaflet.js under the hood)
+import pandas as pd                   # used for creating the results table (DataFrame)
+import requests                       # standard library for making HTTP requests to web APIs
+import streamlit as st                # the main web app framework - handles the UI, routing, and state
+from dotenv import load_dotenv        # reads key=value pairs from the .env file into the environment
+from geopy.geocoders import Nominatim # geocoder from OpenStreetMap - converts addresses to GPS coordinates
+from streamlit_folium import st_folium  # a bridge component that embeds folium maps inside a Streamlit page
+from streamlit_searchbox import st_searchbox  # a Streamlit component that adds an autocomplete search box
+from urllib.parse import quote as url_quote   # encodes special characters in strings so they can be used in URLs (e.g. spaces become %20)
+
+# macOS ships Python without trusting the usual system SSL certificates
+# this tells the requests library where to find a trusted certificate bundle
+# without this, any HTTPS request on macOS might throw an "SSL verify failed" error
 os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 
-# Import shared constants from config.py so they live in one place.
+# import shared settings from config.py - we put all configurable values there
+# so they are easy to change without hunting through the code
 from config import (
-    DEFAULT_FUEL_TYPE,        # which fuel type is pre-selected in the UI
-    DEFAULT_RADIUS_KM,        # default search radius in km
-    FUEL_TYPES,               # list of supported fuel types: ["E5", "E10", "Diesel"]
-    MAX_RADIUS_KM,            # slider upper limit
-    OSRM_URL,                 # fallback routing server (used if no Mapbox token)
-    ROUTE_CORRIDOR_KM,        # how far off the route a station can be and still count
-    ROUTE_SAMPLE_INTERVAL_KM, # how often we sample the route to search for stations
-    TOP_N_RESULTS,            # max stations to show in the results table
+    DEFAULT_FUEL_TYPE,        # which fuel type is selected when the app loads (E5)
+    DEFAULT_RADIUS_KM,        # default search radius shown in the slider
+    FUEL_TYPES,               # list of all supported fuel types: ["E5", "E10", "Diesel"]
+    MAX_RADIUS_KM,            # the maximum value the radius slider can go to
+    OSRM_URL,                 # URL of the backup routing server (used if Mapbox token is missing)
+    ROUTE_CORRIDOR_KM,        # a station is only included if it's within this many km of the route
+    ROUTE_SAMPLE_INTERVAL_KM, # we check for stations every X km along the route
+    TOP_N_RESULTS,            # only show this many stations in the results table
 )
 
 # ---------------------------------------------------------------------------
-# Custom CSS — injected once in main() via st.markdown(unsafe_allow_html=True)
+# Custom CSS - injected into the page to override Streamlit's default styling
+# We use this to get a dark GitHub-style theme with orange accent colours
 # ---------------------------------------------------------------------------
 _CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
-/* ── Global typography ─────────────────────────────────────────────────── */
+/* use Inter (a clean modern sans-serif font) everywhere on the page */
 html, body, [class*="css"] {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
 }
 
-/* ── Hide default Streamlit chrome ─────────────────────────────────────── */
+/* hide the default Streamlit hamburger menu and footer bar */
 #MainMenu, footer { visibility: hidden; }
 [data-testid="stToolbar"]    { display: none !important; }
 [data-testid="stDecoration"] { display: none !important; }
 
-/* ── Page background ───────────────────────────────────────────────────── */
+/* dark navy background for the whole app */
 .stApp { background: #0D1117; }
 
-/* ── Tighten the main content padding ─────────────────────────────────── */
+/* tighten padding and set a max width for the main content area */
 .main .block-container {
     padding-top: 2.5rem !important;
     padding-left: 3rem   !important;
@@ -86,14 +80,14 @@ html, body, [class*="css"] {
     max-width: 1400px    !important;
 }
 
-/* ── Sidebar ───────────────────────────────────────────────────────────── */
+/* dark sidebar with a subtle right border */
 [data-testid="stSidebar"] > div:first-child {
     background: #010409 !important;
     border-right: 1px solid #21262D !important;
     padding: 2rem 1.5rem !important;
 }
 
-/* ── Primary button ────────────────────────────────────────────────────── */
+/* orange gradient for the Search / Plan trip buttons */
 .stButton > button[kind="primary"] {
     background: linear-gradient(135deg, #F97316 0%, #DC6309 100%) !important;
     color: #fff !important;
@@ -106,6 +100,7 @@ html, body, [class*="css"] {
     box-shadow: 0 2px 8px rgba(249,115,22,0.25) !important;
     transition: all 0.2s ease !important;
 }
+/* slight lift effect when hovering over the button */
 .stButton > button[kind="primary"]:hover {
     transform: translateY(-1px) !important;
     box-shadow: 0 5px 18px rgba(249,115,22,0.45) !important;
@@ -114,7 +109,7 @@ html, body, [class*="css"] {
     transform: translateY(0) !important;
 }
 
-/* ── Metric cards ──────────────────────────────────────────────────────── */
+/* dark card style for the metric boxes (distance, cost, stops) */
 [data-testid="metric-container"] {
     background: #161B22 !important;
     border: 1px solid #21262D !important;
@@ -139,41 +134,39 @@ html, body, [class*="css"] {
     font-weight: 600 !important;
 }
 
-/* ── Progress bar ──────────────────────────────────────────────────────── */
+/* orange progress bar used during trip planning */
 .stProgress > div > div > div > div {
     background: linear-gradient(90deg, #F97316, #DC6309) !important;
     border-radius: 4px !important;
 }
 
-/* ── Alerts ────────────────────────────────────────────────────────────── */
+/* rounded corners on info/warning/error boxes */
 [data-testid="stAlert"] { border-radius: 10px !important; }
 
-/* ── Expander ──────────────────────────────────────────────────────────── */
+/* expander (collapsible section) styling */
 details summary {
     border-radius: 8px !important;
     font-weight: 500 !important;
     font-size: 0.875rem !important;
 }
 
-/* ── Dividers ──────────────────────────────────────────────────────────── */
+/* subtle horizontal divider lines */
 hr {
     border-color: #21262D !important;
     margin: 1rem 0 !important;
 }
 
-/* ── DataFrames ────────────────────────────────────────────────────────── */
+/* rounded border around data tables */
 [data-testid="stDataFrame"] > div {
     border: 1px solid #21262D !important;
     border-radius: 12px !important;
     overflow: hidden !important;
 }
 
-/* ── Captions ──────────────────────────────────────────────────────────── */
+/* smaller grey caption text */
 .stCaption p { color: #6E7681 !important; font-size: 0.78rem !important; }
 
-/* ── Custom component classes used in this app ─────────────────────────── */
-
-/* Page hero header */
+/* large page title + subtitle at the top of each mode */
 .ff-page-header { margin-bottom: 2rem; }
 .ff-page-header h1 {
     font-size: 2rem;
@@ -190,7 +183,7 @@ hr {
     font-weight: 400;
 }
 
-/* Section label (replaces st.subheader) */
+/* small uppercase section label (used above the map and table) */
 .ff-section {
     font-size: 0.65rem;
     font-weight: 700;
@@ -202,7 +195,7 @@ hr {
     border-bottom: 1px solid #21262D;
 }
 
-/* Sidebar brand block */
+/* "FuelFinder" logo text in the sidebar */
 .ff-brand-name {
     font-size: 1.3rem;
     font-weight: 800;
@@ -217,7 +210,7 @@ hr {
     font-weight: 400;
 }
 
-/* Sidebar nav pill */
+/* navigation pill buttons in the sidebar */
 .ff-nav-pill {
     display: block;
     padding: 0.6rem 1rem;
@@ -236,7 +229,7 @@ hr {
     font-weight: 600;
 }
 
-/* Sidebar footer links */
+/* small footer text at the bottom of the sidebar */
 .ff-sidebar-footer {
     font-size: 0.72rem;
     color: #484F58;
@@ -248,7 +241,7 @@ hr {
 }
 .ff-sidebar-footer a:hover { color: #E6EDF3; }
 
-/* Result count badge */
+/* rounded badge showing number of results */
 .ff-result-count {
     display: inline-block;
     background: #21262D;
@@ -262,62 +255,72 @@ hr {
 </style>
 """
 
-# Load key=value pairs from the .env file into the process environment.
-# This makes TANKERKOENIG_API_KEY and MAPBOX_TOKEN available via os.getenv().
+# load our API keys from the .env file
+# after this line, os.getenv("TANKERKOENIG_API_KEY") and os.getenv("MAPBOX_TOKEN") will work
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# API endpoint URLs
+# API endpoint URLs - the web addresses we send requests to
 # ---------------------------------------------------------------------------
-TANKERKOENIG_URL    = "https://creativecommons.tankerkoenig.de/json/list.php"
-ECONTROL_URL        = "https://api.e-control.at/sprit/1.0/search/gas-stations/by-address"
-OVERPASS_URL        = "https://overpass-api.de/api/interpreter"
-MAPBOX_GEOCODING_URL  = "https://api.mapbox.com/geocoding/v5/mapbox.places"
-MAPBOX_DIRECTIONS_URL = "https://api.mapbox.com/directions/v5/mapbox/driving"
+TANKERKOENIG_URL    = "https://creativecommons.tankerkoenig.de/json/list.php"       # German fuel prices
+ECONTROL_URL        = "https://api.e-control.at/sprit/1.0/search/gas-stations/by-address"  # Austrian fuel prices
+OVERPASS_URL        = "https://overpass-api.de/api/interpreter"                     # OpenStreetMap data (Switzerland)
+MAPBOX_GEOCODING_URL  = "https://api.mapbox.com/geocoding/v5/mapbox.places"         # address -> coordinates
+MAPBOX_DIRECTIONS_URL = "https://api.mapbox.com/directions/v5/mapbox/driving"       # route planning
 
-# Many APIs (Nominatim, Overpass) require a descriptive User-Agent string
-# so they can identify and contact us if our usage causes problems.
+# many public APIs require a User-Agent header so they can identify who is making the request
+# this is a requirement for Nominatim and Overpass - they block requests without it
 USER_AGENT = "FuelFinder/2.0 (HSG Group 4495 - student project)"
 
-# Tankerkoenig hard-caps the search radius at 25 km regardless of what we send.
+# Tankerkoenig won't accept a radius larger than 25 km - it's a hard API limit
 TANKERKOENIG_MAX_RADIUS = 25
 
-# Approximate bounding boxes for each country (lat_min, lat_max, lon_min, lon_max).
-# Used to skip country API calls when the search point is clearly outside that country,
-# which is the main speed-up for the trip planner on routes that don't cross all three.
-_DE_BBOX = (47.3, 55.1,  5.9, 15.0)
-_AT_BBOX = (46.4, 49.0,  9.5, 17.2)
-_CH_BBOX = (45.8, 47.9,  5.9, 10.5)
+# rough geographic bounding boxes for each country
+# format: (min_latitude, max_latitude, min_longitude, max_longitude)
+# we use these to quickly skip API calls for countries the user isn't searching near
+_DE_BBOX = (47.3, 55.1,  5.9, 15.0)  # Germany
+_AT_BBOX = (46.4, 49.0,  9.5, 17.2)  # Austria
+_CH_BBOX = (45.8, 47.9,  5.9, 10.5)  # Switzerland
 
 
 def _near_country(lat: float, lon: float, radius_km: float,
                   bbox: tuple[float, float, float, float]) -> bool:
-    """Return True if the search circle could overlap the given country bounding box."""
+    """
+    Returns True if the search circle (centre lat/lon, radius in km) might overlap with the country.
+    We use this to avoid calling an API for a country that is clearly not in the search area.
+    For example if someone searches near Paris, we skip the Austria and Switzerland APIs entirely.
+    """
     lat_min, lat_max, lon_min, lon_max = bbox
-    # Convert radius to degrees (rough but good enough for a bounding-box pre-check)
+
+    # 1 degree of latitude is roughly 111 km, so we divide by 111 to convert km to degrees
+    # this gives us a rough "buffer" in degrees around the search point
     buf = radius_km / 111.0
+
+    # check if the search circle (with buffer) overlaps the country's bounding box
     return (lat - buf < lat_max and lat + buf > lat_min and
             lon - buf < lon_max and lon + buf > lon_min)
 
 
 # ---------------------------------------------------------------------------
-# API key helpers — check .env first, then Streamlit Cloud secrets
+# Functions to retrieve API keys
+# We check the .env file first (local development), then Streamlit Cloud secrets
 # ---------------------------------------------------------------------------
 
 def get_api_key() -> str:
-    """Return the Tankerkoenig API key, or empty string if not configured."""
+    """Returns the Tankerkoenig API key as a string, or '' if it's not configured."""
+    # os.getenv reads the value from the environment (loaded from .env by load_dotenv above)
     key = os.getenv("TANKERKOENIG_API_KEY", "").strip()
     if key:
         return key
-    # On Streamlit Cloud, secrets are stored in the dashboard rather than .env
+    # if running on Streamlit Cloud, secrets are managed through their dashboard instead of .env
     try:
         return st.secrets.get("TANKERKOENIG_API_KEY", "").strip()
     except Exception:
-        return ""
+        return ""  # return empty string if neither source has the key
 
 
 def get_mapbox_token() -> str:
-    """Return the Mapbox access token, or empty string if not configured."""
+    """Returns the Mapbox access token as a string, or '' if it's not configured."""
     token = os.getenv("MAPBOX_TOKEN", "").strip()
     if token:
         return token
@@ -328,57 +331,64 @@ def get_mapbox_token() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Mapbox geocoding helpers (used by the address search box)
+# Mapbox address autocomplete
 # ---------------------------------------------------------------------------
 
-# Module-level dict that caches geocoding results from the search box.
-# When the user picks a suggestion, its coordinates are stored here so
-# we can look them up instantly when the Search / Plan trip button is clicked
-# without making a second API call.
+# this dictionary stores geocoding results as the user types in the search box
+# key = the address string the user sees, value = GeoResult with lat/lon
+# we cache them here so we don't need to call the API again when the user clicks Search
 _geo_cache: dict[str, "GeoResult"] = {}
 
 
 def _mapbox_suggestions(query: str) -> list[str]:
     """
-    Called by st_searchbox on every keystroke.
-    Sends the partial query to the Mapbox Geocoding API and returns up to 5
-    matching place names. Coordinates are stored in _geo_cache for later lookup.
+    This function is called automatically every time the user types a character in the search box.
+    It sends the partial query to Mapbox and returns a list of up to 5 matching place name strings.
+    The coordinates for each suggestion are saved in _geo_cache for later use.
     """
+    # don't bother calling the API if the user has only typed 1 character
     if len(query) < 2:
-        # Don't call the API for very short queries — avoids spamming requests
         return []
+
     token = get_mapbox_token()
     if not token:
-        return []  # can't search without a token
+        return []  # can't use Mapbox without a token
 
-    # The search text goes in the URL path, so it must be URL-encoded
+    # the address text needs to be URL-encoded before we can put it in the request URL
+    # e.g. "St. Gallen" becomes "St.%20Gallen" (spaces are not allowed raw in URLs)
     url = f"{MAPBOX_GEOCODING_URL}/{url_quote(query, safe='')}.json"
+
     try:
+        # send the request with a 5-second timeout so the UI doesn't hang
         resp = requests.get(url, params={"access_token": token, "limit": 5}, timeout=5)
-        data = resp.json()
+        data = resp.json()  # parse the JSON response into a Python dictionary
     except Exception:
-        return []  # silently return no suggestions on network error
+        return []  # if anything goes wrong (network error, timeout etc.) return nothing
 
     results = []
+    # "features" is the list of matching locations in the Mapbox response
     for f in data.get("features", []):
-        name = f["place_name"]          # human-readable address string
-        lon, lat = f["center"]          # Mapbox returns [longitude, latitude]
-        # Store the coordinates under the place name so we can retrieve them later
+        name = f["place_name"]   # the full human-readable address string
+        lon, lat = f["center"]   # Mapbox gives coordinates as [longitude, latitude] (note the reversed order!)
+
+        # save the coordinates so we can look them up instantly when the user clicks Search
         _geo_cache[name] = GeoResult(lat=lat, lon=lon, address=name)
         results.append(name)
-    return results
+
+    return results  # Streamlit will show these as dropdown options
 
 
 def _mapbox_tile_url() -> Optional[str]:
     """
-    Returns the Mapbox Streets tile URL template for folium.
-    The {z}/{x}/{y} placeholders are filled by folium at render time.
-    Double braces {{ }} produce literal { } in the f-string.
-    Returns None if no token is set (folium falls back to OpenStreetMap).
+    Returns the URL template for Mapbox Streets map tiles (the visual background of the map).
+    Folium replaces {z}, {x}, {y} with the actual tile coordinates when loading the map.
+    Returns None if no Mapbox token is set - folium will use free OpenStreetMap tiles instead.
     """
     token = get_mapbox_token()
     if not token:
         return None
+    # the double braces {{ }} in an f-string produce literal { } characters
+    # we need this because folium expects {z}/{x}/{y} as placeholders in the URL
     return (
         f"https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/256"
         f"/{{z}}/{{x}}/{{y}}?access_token={token}"
@@ -389,167 +399,193 @@ def _mapbox_tile_url() -> Optional[str]:
 # 2. DATA LAYER — data classes, geocoding, distance, country fetchers
 # ===========================================================================
 
+# We use Python dataclasses to define simple data containers
+# A dataclass is basically a class where you just declare the fields - Python handles __init__ etc.
+
 @dataclass
 class GeoResult:
-    """Holds the result of a geocoding lookup: coordinates + display address."""
-    lat: float
-    lon: float
-    address: str
+    """Stores the result of converting an address into GPS coordinates."""
+    lat: float      # latitude (north-south position)
+    lon: float      # longitude (east-west position)
+    address: str    # the full address string as returned by the geocoder
 
 
 @dataclass
 class FetchResult:
     """
-    Container returned by every country fetcher.
-    stations — list of station dicts (one per station found)
-    warnings — non-fatal messages shown to the user (e.g. API key missing)
+    Holds the output from one of our country fetcher functions (fetch_germany, etc.).
+    stations: a list of dictionaries, one per fuel station found
+    warnings: a list of warning messages to show the user (e.g. "API key missing")
     """
+    # field(default_factory=list) means each new FetchResult gets its own empty list
+    # (if we just wrote stations: list = [] all instances would share the same list, which would cause bugs)
     stations: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     def extend(self, other: "FetchResult") -> None:
-        """Merge another FetchResult into this one (used in gather_all)."""
+        """Merge the stations and warnings from another FetchResult into this one."""
         self.stations.extend(other.stations)
         self.warnings.extend(other.warnings)
 
 
 # ---------------------------------------------------------------------------
-# Distance calculation
+# Distance calculation using the Haversine formula
 # ---------------------------------------------------------------------------
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """
-    Calculate the straight-line distance between two GPS coordinates in km.
-    Uses the Haversine formula, which accounts for the Earth's curvature.
-    This is more accurate than a flat Euclidean distance for geographic points.
+    Calculates the straight-line distance in km between two GPS coordinates.
+
+    We can't just use Pythagoras (a^2 + b^2 = c^2) here because the Earth is a sphere,
+    not a flat surface. The Haversine formula accounts for the Earth's curvature and gives
+    accurate results for short and medium distances.
     """
-    R = 6371.0  # Earth's mean radius in km
-    # Convert degrees to radians (math trig functions require radians)
+    R = 6371.0  # Earth's average radius in km
+
+    # Python's math.sin/cos work in radians, but GPS coordinates are in degrees
+    # so we convert: radians = degrees * pi / 180  (math.radians does this for us)
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)   # latitude difference
-    dlmb = math.radians(lon2 - lon1)   # longitude difference
-    # Haversine formula
+    dphi = math.radians(lat2 - lat1)   # difference in latitude, converted to radians
+    dlmb = math.radians(lon2 - lon1)   # difference in longitude, converted to radians
+
+    # the actual Haversine formula
+    # 'a' is a intermediate value between 0 and 1 representing the square of half the chord length
     a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlmb / 2) ** 2
+
+    # convert 'a' to a distance in km
     return 2 * R * math.asin(math.sqrt(a))
 
 
 # ---------------------------------------------------------------------------
-# Geocoding — convert a place name or address to coordinates
+# Geocoding — convert a text address to GPS coordinates
 # ---------------------------------------------------------------------------
 
+# @st.cache_data tells Streamlit to remember the result of this function
+# if the same query is passed again within 86400 seconds (24 hours), it returns the cached result
+# instead of calling the API again - this makes the app faster and avoids hitting API limits
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode(query: str) -> Optional[GeoResult]:
     """
-    Convert a free-text location (city name, postcode, address) to lat/lon.
-    Results are cached for 24 hours (ttl=86400 seconds) so repeated lookups
-    of the same location don't re-call the API.
+    Converts a place name or address (like "Munich" or "8001 Zurich") into GPS coordinates.
 
-    Priority:
-      1. Check _geo_cache (populated by the search box — instant, no API call)
-      2. Mapbox Geocoding API (if token is set)
-      3. Nominatim / OpenStreetMap (free fallback, no key needed)
+    We try three options in order:
+    1. Check if we already have it cached from the autocomplete search (fastest - no API call)
+    2. Try the Mapbox Geocoding API (accurate, fast, needs token)
+    3. Fall back to Nominatim/OpenStreetMap (free, no key needed, slightly slower)
+
+    Returns None if the location can't be found anywhere.
     """
-    # If the user selected this from the autocomplete dropdown, we already
-    # have the coordinates cached — return immediately without an API call.
+    # if the user selected this from the dropdown, we already saved the coordinates in _geo_cache
+    # this is the most common case and avoids any API calls
     if query in _geo_cache:
         return _geo_cache[query]
 
     token = get_mapbox_token()
     if token:
-        # Use Mapbox Geocoding API — faster and more accurate than Nominatim
+        # use Mapbox - it's more accurate than Nominatim, especially for partial addresses
         url = f"{MAPBOX_GEOCODING_URL}/{url_quote(query, safe='')}.json"
         try:
             resp = requests.get(url, params={"access_token": token, "limit": 1}, timeout=10)
             data = resp.json()
             features = data.get("features", [])
             if not features:
-                return None
-            f = features[0]
-            lon, lat = f["center"]  # Mapbox returns [lon, lat], not [lat, lon]
+                return None  # no results found for this query
+            f = features[0]  # take the top result
+            lon, lat = f["center"]  # important: Mapbox returns [longitude, latitude], not [latitude, longitude]
             return GeoResult(lat=lat, lon=lon, address=f["place_name"])
         except Exception:
-            return None
+            return None  # if the request fails for any reason, fall through to Nominatim
 
-    # Fallback: Nominatim (OpenStreetMap's free geocoder, no API key needed)
+    # fallback: Nominatim is OpenStreetMap's free geocoding service - no registration needed
     geocoder = Nominatim(user_agent=USER_AGENT, timeout=10)
     try:
-        location = geocoder.geocode(query)
+        location = geocoder.geocode(query)  # this sends the request to Nominatim
     except Exception:
         return None
     if location is None:
-        return None
+        return None  # Nominatim also couldn't find it
     return GeoResult(lat=location.latitude, lon=location.longitude, address=location.address)
 
 
 # ---------------------------------------------------------------------------
-# Country fetchers — one function per data source
+# Country fetcher functions — one for each data source
+# Each function fetches stations for one country and returns a FetchResult
 # ---------------------------------------------------------------------------
 
+# cache results for 5 minutes - fuel prices update frequently so we don't cache for too long
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_germany(lat: float, lon: float, radius_km: float, fuel_type: str) -> FetchResult:
     """
-    Fetch live German fuel prices from the Tankerkoenig API.
-    Results are cached for 5 minutes (ttl=300) — prices update frequently.
+    Fetches live fuel prices from the German Tankerkoenig API.
+    Returns a FetchResult with a list of stations (each station is a dictionary).
+    Only returns stations that are currently open and have a price listed.
     Requires a free API key from creativecommons.tankerkoenig.de.
-
-    The API returns stations sorted by price (cheapest first).
-    Only open stations with a known price are included in the result.
     """
-    result = FetchResult()
+    result = FetchResult()  # start with an empty result
 
-    # Skip immediately if the search point is clearly outside Germany
+    # if the search location is clearly not in Germany, skip the API call entirely
     if not _near_country(lat, lon, radius_km, _DE_BBOX):
-        return result
+        return result  # returns empty result - no stations, no warnings
 
     api_key = get_api_key()
-
-    # Skip Germany entirely if no API key is configured
     if not api_key:
+        # no key = we can't use this API, add a warning so the user knows
         result.warnings.append("Germany skipped: TANKERKOENIG_API_KEY not set.")
         return result
 
-    # The API hard-caps the radius at 25 km — cap our request and warn the user
+    # the Tankerkoenig API silently ignores any radius above 25 km
+    # so we cap it ourselves and tell the user if we had to reduce their radius
     capped = min(radius_km, TANKERKOENIG_MAX_RADIUS)
     if radius_km > TANKERKOENIG_MAX_RADIUS:
         result.warnings.append(
             f"Germany radius capped at {TANKERKOENIG_MAX_RADIUS} km (Tankerkoenig API limit)."
         )
 
-    # Map our fuel type names to the API's expected values
+    # build the query parameters for the API request
+    # the API uses different names for fuel types (e5, e10, diesel) than we do (E5, E10, Diesel)
     params = {
-        "lat": lat, "lng": lon, "rad": capped,
-        "sort": "price",   # return cheapest stations first
-        "type": {"E5": "e5", "E10": "e10", "Diesel": "diesel"}[fuel_type],
+        "lat": lat,
+        "lng": lon,
+        "rad": capped,
+        "sort": "price",   # ask the API to return cheapest stations first
+        "type": {"E5": "e5", "E10": "e10", "Diesel": "diesel"}[fuel_type],  # map our name to API name
         "apikey": api_key,
     }
 
     try:
         resp = requests.get(TANKERKOENIG_URL, params=params, timeout=15)
-        resp.raise_for_status()  # raises an exception if HTTP status is 4xx/5xx
-        data = resp.json()
+        resp.raise_for_status()  # this throws an exception if the server returns an error (4xx or 5xx)
+        data = resp.json()       # convert the JSON response text into a Python dictionary
     except requests.RequestException as e:
+        # something went wrong with the network request - add a warning and return empty
         result.warnings.append(f"Germany unavailable: {e}")
         return result
 
-    # The API signals errors in the response body rather than HTTP status codes
+    # Tankerkoenig uses an "ok" field in the JSON to signal API-level errors
+    # (e.g. invalid API key) rather than using HTTP error codes
     if not data.get("ok"):
         result.warnings.append(f"Germany unavailable: {data.get('message', 'unknown error')}")
         return result
 
-    # Parse each station from the API response into our standard station dict format
+    # loop through the list of stations in the API response
     for s in data.get("stations", []):
+        # skip stations that are currently closed
         if not s.get("isOpen"):
-            continue  # skip closed stations
+            continue
+
         price = s.get("price")
         if not price:
-            continue  # skip stations with no price reported
+            continue  # skip stations that don't have a price listed right now
 
-        # Build a readable address string from the separate address fields
+        # the API returns address parts separately, so we join them into one readable string
         street = (s.get("street") or "").strip()
         house  = (s.get("houseNumber") or "").strip()
         post   = str(s.get("postCode") or "").strip()
         place  = (s.get("place") or "").strip()
 
+        # add this station as a dictionary to our results list
+        # we use the same dictionary structure for all three countries so the rest of the
+        # code can treat them identically regardless of which API they came from
         result.stations.append({
             "name":        (s.get("name") or "Unknown").strip(),
             "brand":       (s.get("brand") or "").strip(),
@@ -557,115 +593,118 @@ def fetch_germany(lat: float, lon: float, radius_km: float, fuel_type: str) -> F
             "country":     "DE",
             "lat":         s.get("lat"),
             "lon":         s.get("lng"),
-            "price":       float(price),
+            "price":       float(price),       # price per litre in euros
             "fuel_type":   fuel_type,
             "distance_km": float(s.get("dist", 0.0)),
             "source":      "Tankerkoenig",
         })
+
     return result
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_austria(lat: float, lon: float, radius_km: float, fuel_type: str) -> FetchResult:
     """
-    Fetch Austrian fuel station data from the E-Control / Spritpreisrechner.at API.
-    No API key required — this is a public government API.
+    Fetches Austrian fuel station data from the E-Control / Spritpreisrechner.at API.
+    No API key needed - this is a free public government API.
 
-    Important limitations:
-    - The API ignores the radius parameter and always returns the ~10 nearest stations.
-      We apply our own distance filter client-side.
-    - Austria has no E5/E10 distinction — both map to "SUP" (Super 95).
-    - Prices may be empty outside business hours (Austrian law allows price changes
-      only at 12:00, 14:00, and 16:00). When empty, stations still appear as grey markers.
+    Two quirks to know about:
+    1. The API ignores our radius and always returns the ~10 nearest stations,
+       so we have to filter by distance ourselves after getting the response.
+    2. Austria doesn't distinguish between E5 and E10 - both are just "Super 95" (SUP).
+    3. Prices can be empty because Austrian law only allows price updates at 12:00, 14:00 and 16:00.
+       Outside those times some stations may not have a current price listed.
     """
     result = FetchResult()
 
-    # Skip immediately if the search point is clearly outside Austria
+    # skip if not near Austria
     if not _near_country(lat, lon, radius_km, _AT_BBOX):
         return result
 
-    # Map our fuel type names to the E-Control API's expected values
+    # map our fuel type names to the names this API expects
     fuel_map = {"E5": "SUP", "E10": "SUP", "Diesel": "DIE"}
+
     params = {
-        "latitude":     lat,
-        "longitude":    lon,
-        "fuelType":     fuel_map[fuel_type],
-        "includeClosed": "false",  # only return currently open stations
+        "latitude":      lat,
+        "longitude":     lon,
+        "fuelType":      fuel_map[fuel_type],
+        "includeClosed": "false",   # we only want stations that are open right now
     }
 
     try:
         resp = requests.get(
             ECONTROL_URL, params=params,
-            headers={"User-Agent": USER_AGENT}, timeout=15,
+            headers={"User-Agent": USER_AGENT},  # required by the API
+            timeout=15,
         )
         resp.raise_for_status()
-        data = resp.json()  # returns a list of station objects
+        data = resp.json()  # the response is a list of station objects (not wrapped in a dict)
     except requests.RequestException as e:
         result.warnings.append(f"Austria unavailable: {e}")
         return result
 
+    # loop through each station in the list
     for s in data:
+        # the location info is nested inside a "location" sub-dictionary
         loc = s.get("location") or {}
         slat, slon = loc.get("latitude"), loc.get("longitude")
-        if slat is None or slon is None:
-            continue  # skip stations with no GPS coordinates
 
-        # Apply our own radius filter since the API ignores it
+        if slat is None or slon is None:
+            continue  # skip stations that don't have GPS coordinates
+
+        # calculate how far this station is from our search point
         d = haversine_km(lat, lon, slat, slon)
+
+        # the API doesn't filter by radius (it always returns the nearest ~10),
+        # so we have to check ourselves and skip stations that are too far away
         if d > radius_km:
             continue
 
-        # Extract the price — may be empty outside reporting hours
+        # prices are in a list - get the first price if it exists
         prices = s.get("prices") or []
-        amount = prices[0].get("amount") if prices else None
+        amount = prices[0].get("amount") if prices else None  # could be None if no price available
 
-        # Build a readable address from the location sub-object
+        # build the address from its parts
         addr_parts = [
             (loc.get("address") or "").strip(),
             f"{(loc.get('postalCode') or '').strip()} {(loc.get('city') or '').strip()}".strip(),
         ]
+
         result.stations.append({
             "name":        (s.get("name") or "Unknown").strip(),
-            "brand":       "",  # E-Control API does not return brand information
-            "address":     ", ".join(p for p in addr_parts if p),
+            "brand":       "",  # the Austrian API doesn't include brand info
+            "address":     ", ".join(p for p in addr_parts if p),  # join non-empty parts with comma
             "country":     "AT",
             "lat":         slat,
             "lon":         slon,
-            "price":       float(amount) if amount else None,  # None = no price available
+            "price":       float(amount) if amount else None,  # None means no price available right now
             "fuel_type":   fuel_type,
             "distance_km": d,
             "source":      "Spritpreisrechner.at",
         })
+
     return result
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_switzerland(lat: float, lon: float, radius_km: float, fuel_type: str) -> FetchResult:
     """
-    Fetch Swiss fuel station locations from the OpenStreetMap Overpass API.
-    No API key required — Overpass is a free public service.
-
-    Important limitation:
-    Switzerland has NO public fuel price database. This function returns station
-    locations only (shown as grey markers with no price). Prices are occasionally
-    tagged in OSM by volunteers, but this is rare.
-
-    The Overpass query filters by the Switzerland country area (ISO3166-1 = CH)
-    to prevent stations from neighbouring countries (e.g. Austria near Vienna)
-    from being incorrectly included.
+    Fetches Swiss fuel station locations from OpenStreetMap via the Overpass API.
+    No API key needed. However, Switzerland has no public fuel price database,
+    so we can only show station locations (grey markers) without prices.
+    Occasionally OpenStreetMap volunteers tag prices manually, but this is rare.
     """
     result = FetchResult()
 
-    # Skip the slow Overpass call if the search point is clearly outside Switzerland.
-    # This is the biggest single speed-up for routes that don't pass through Switzerland.
+    # skip if not near Switzerland
     if not _near_country(lat, lon, radius_km, _CH_BBOX):
         return result
 
-    radius_m = int(radius_km * 1000)  # Overpass requires the radius in metres
+    radius_m = int(radius_km * 1000)  # Overpass expects radius in metres, not kilometres
 
-    # Overpass QL query:
-    # - First define Switzerland as an area using its ISO country code
-    # - Then find all fuel nodes/ways within our search radius AND inside that area
+    # Overpass QL is a special query language for fetching OpenStreetMap data
+    # this query finds all fuel stations within our radius that are inside Switzerland
+    # we restrict to Switzerland using the ISO country code to avoid stations from neighbouring countries
     overpass_query = f"""
     [out:json][timeout:25];
     area["ISO3166-1"="CH"][admin_level=2]->.ch;
@@ -677,10 +716,12 @@ def fetch_switzerland(lat: float, lon: float, radius_km: float, fuel_type: str) 
     """
 
     try:
-        # Overpass uses POST requests for queries
+        # Overpass uses POST requests (unlike most APIs that use GET)
         resp = requests.post(
-            OVERPASS_URL, data={"data": overpass_query},
-            headers={"User-Agent": USER_AGENT}, timeout=30,
+            OVERPASS_URL,
+            data={"data": overpass_query},
+            headers={"User-Agent": USER_AGENT},
+            timeout=30,  # Overpass can be slow, so we give it a longer timeout
         )
         resp.raise_for_status()
         data = resp.json()
@@ -688,40 +729,44 @@ def fetch_switzerland(lat: float, lon: float, radius_km: float, fuel_type: str) 
         result.warnings.append(f"Switzerland unavailable: {e}")
         return result
 
+    # OSM can return two types of elements: nodes (a single point) or ways (a polygon/area)
+    # large fuel stations might be mapped as a polygon (way) rather than a single point
     for el in data.get("elements", []):
-        tags = el.get("tags") or {}
+        tags = el.get("tags") or {}  # tags contain metadata like name, brand, address
 
-        # OSM returns either nodes (points) or ways (polygons for large stations).
-        # Ways have a "center" field with the centroid coordinates.
         if el.get("type") == "node":
+            # a node is a single GPS point
             slat, slon = el.get("lat"), el.get("lon")
         else:
+            # a way (polygon) has a "center" field with the centre point of the shape
             c = el.get("center") or {}
             slat, slon = c.get("lat"), c.get("lon")
 
         if slat is None or slon is None:
-            continue
+            continue  # skip elements with no coordinates
 
-        # Apply distance filter (Overpass "around" is approximate)
+        # the Overpass "around" radius is approximate, so we verify the distance ourselves
         d = haversine_km(lat, lon, slat, slon)
         if d > radius_km:
             continue
 
-        # Some OSM contributors tag fuel prices — check for common key formats
+        # check if any OSM contributor has tagged the fuel price on this station
+        # OSM uses keys like "charge:e5" or "price:diesel" for prices
         price = None
         for key in (f"charge:{fuel_type.lower()}", f"price:{fuel_type.lower()}"):
             if key in tags:
                 try:
-                    price = float(tags[key])
+                    price = float(tags[key])  # try to convert the tag value to a number
                     break
                 except ValueError:
-                    pass  # ignore non-numeric price tags
+                    pass  # if the value isn't a valid number, just ignore it
 
-        # Build address from OSM address tags (often incomplete or missing)
+        # build address from OSM address tags - these are often incomplete or missing
         addr_parts = [
             f"{(tags.get('addr:street') or '').strip()} {(tags.get('addr:housenumber') or '').strip()}".strip(),
             f"{(tags.get('addr:postcode') or '').strip()} {(tags.get('addr:city') or '').strip()}".strip(),
         ]
+
         result.stations.append({
             "name":        tags.get("name") or tags.get("brand") or "Tankstelle",
             "brand":       tags.get("brand") or "",
@@ -729,35 +774,42 @@ def fetch_switzerland(lat: float, lon: float, radius_km: float, fuel_type: str) 
             "country":     "CH",
             "lat":         slat,
             "lon":         slon,
-            "price":       price,  # None for almost all Swiss stations
+            "price":       price,   # almost always None - Switzerland has no public price data
             "fuel_type":   fuel_type,
             "distance_km": d,
             "source":      "OpenStreetMap",
         })
+
     return result
 
 
 # ---------------------------------------------------------------------------
-# Aggregator — merge all three country results into one sorted list
+# Combine results from all three countries into one sorted list
 # ---------------------------------------------------------------------------
 
 def gather_all(lat: float, lon: float, radius_km: float, fuel_type: str) -> FetchResult:
     """
-    Run all three country fetchers in sequence and combine their results.
+    Calls all three country fetchers and merges their results into one list.
 
-    Sorting order:
-      1. Stations WITH a price come first, sorted cheapest to most expensive.
-      2. Stations WITHOUT a price (Switzerland, and Austria outside reporting hours)
-         come last, sorted by distance.
+    Sorting logic:
+    - Stations with a price come first, sorted cheapest to most expensive.
+    - Stations without a price (Switzerland, or Austria outside update windows) go last,
+      sorted by distance from the search point.
     """
     combined = FetchResult()
+
+    # call each country's fetcher and add its results to the combined list
     combined.extend(fetch_germany(lat, lon, radius_km, fuel_type))
     combined.extend(fetch_austria(lat, lon, radius_km, fuel_type))
     combined.extend(fetch_switzerland(lat, lon, radius_km, fuel_type))
 
+    # sort the combined list using a tuple key:
+    # - first sort by whether price is None (False = has price, sorts first; True = no price, sorts last)
+    # - then by price ascending (cheapest first)
+    # - then by distance (closest first, as tiebreaker)
     combined.stations.sort(
         key=lambda s: (
-            s["price"] is None,   # False (has price) sorts before True (no price)
+            s["price"] is None,
             s["price"] if s["price"] is not None else float("inf"),
             s["distance_km"],
         )
@@ -771,54 +823,57 @@ def gather_all(lat: float, lon: float, radius_km: float, fuel_type: str) -> Fetc
 
 @dataclass
 class Route:
-    """A driving route returned by the Mapbox Directions / OSRM API."""
-    points: list[tuple[float, float]]  # ordered list of (lat, lon) waypoints
-    total_km: float                    # total driving distance in km
+    """Represents a driving route between two locations."""
+    points: list[tuple[float, float]]  # ordered list of (lat, lon) waypoints along the route
+    total_km: float                    # total driving distance in kilometres
 
 
 @dataclass
 class RefuelStop:
-    """One refuelling decision made by the optimiser."""
-    station: dict   # the station dict from gather_all
-    liters: float   # how many litres to buy at this stop
-    cost: float     # total cost at this stop (liters × price per litre)
+    """Represents one refuelling decision along the trip."""
+    station: dict   # the station where we stop (a dictionary from gather_all)
+    liters: float   # how many litres to buy here
+    cost: float     # total cost for this stop (= liters × price per litre)
 
 
 @dataclass
 class TripPlan:
-    """The complete output of the trip optimiser."""
-    stops: list[RefuelStop]   # ordered list of refuel stops
-    total_cost: float         # sum of all stop costs
-    total_distance_km: float  # total route length
-    fuel_remaining_l: float   # fuel left in the tank on arrival
-    feasible: bool            # False if the trip cannot be completed with the given tank
-    message: str = ""         # explanation when feasible=False
+    """The complete output of the refuelling optimiser."""
+    stops: list[RefuelStop]   # list of refuel stops in the order you encounter them
+    total_cost: float         # total amount spent on fuel for the whole trip
+    total_distance_km: float  # total route distance in km
+    fuel_remaining_l: float   # how many litres are left in the tank when you arrive
+    feasible: bool            # False if the trip can't be completed (gap between stations too large)
+    message: str = ""         # human-readable explanation if feasible is False
 
 
 # ---------------------------------------------------------------------------
-# Routing — get a driving route between two points
+# Routing — fetch a driving route from A to B
 # ---------------------------------------------------------------------------
 
+# cache for 1 hour - the route between two fixed points doesn't change
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_route(start_lat: float, start_lon: float,
               end_lat: float, end_lon: float) -> Optional[Route]:
     """
-    Fetch a driving route from Mapbox Directions (falls back to OSRM if no token).
-    Result is cached for 1 hour — routes between fixed points don't change.
+    Fetches a driving route between two GPS coordinates using Mapbox Directions.
+    Falls back to OSRM (a free open-source routing engine) if no Mapbox token is set.
+    Returns a Route object, or None if the route can't be calculated.
 
-    Both Mapbox and OSRM use longitude-first coordinate order in their URLs,
-    which is the opposite of the (lat, lon) convention used everywhere else.
-    We swap back to (lat, lon) when building the Route object.
+    Watch out: both Mapbox and OSRM expect coordinates as longitude,latitude (reversed!)
+    in their URLs, which is the opposite of how we store them everywhere else.
     """
     token = get_mapbox_token()
-    # Coordinates in the URL must be lon,lat (note the swap)
+
+    # coordinates in the URL must be in lon,lat order (NOT lat,lon like everywhere else)
     coords = f"{start_lon},{start_lat};{end_lon},{end_lat}"
 
     if token:
+        # use Mapbox Directions - more accurate, supports traffic
         url    = f"{MAPBOX_DIRECTIONS_URL}/{coords}"
         params = {"geometries": "geojson", "overview": "full", "access_token": token}
     else:
-        # Fallback to the public OSRM demo server (no key needed)
+        # use the free public OSRM demo server as a backup
         url    = f"{OSRM_URL}/{coords}"
         params = {"overview": "full", "geometries": "geojson"}
 
@@ -828,30 +883,36 @@ def get_route(start_lat: float, start_lon: float,
         resp.raise_for_status()
         data = resp.json()
     except requests.RequestException:
-        return None
+        return None  # route request failed
 
     routes = data.get("routes", [])
     if not routes:
-        return None
+        return None  # no route found (e.g. points on different islands)
 
-    route = routes[0]
-    # GeoJSON coordinates are [lon, lat] — swap to our (lat, lon) convention
+    route = routes[0]  # take the first (best) route suggested
+
+    # GeoJSON coordinates are stored as [longitude, latitude]
+    # we swap them to (latitude, longitude) to match our convention throughout the code
     points = [(c[1], c[0]) for c in route["geometry"]["coordinates"]]
+
+    # distance from the API is in metres, so divide by 1000 to get kilometres
     return Route(points=points, total_km=route["distance"] / 1000.0)
 
 
 # ---------------------------------------------------------------------------
-# Route geometry helpers
+# Route geometry helper functions
 # ---------------------------------------------------------------------------
 
 def _cumulative_km(points: list[tuple[float, float]]) -> list[float]:
     """
-    For each point along the route, calculate the total km driven from the start.
-    This turns a list of GPS points into a list of distances like [0, 1.2, 3.5, ...].
-    Used to position stations along the route in the optimiser.
+    Takes a list of GPS waypoints and returns the cumulative distance from the start for each one.
+    For example, if the route has 4 points, it might return [0.0, 1.5, 4.2, 9.8].
+    This tells us "point 0 is at km 0, point 1 is at km 1.5, point 3 is at km 9.8" etc.
+    We need this to know how far along the route any given station is.
     """
-    cum = [0.0]
+    cum = [0.0]  # start at 0 km
     for i in range(1, len(points)):
+        # add the distance from the previous point to get the running total
         cum.append(cum[-1] + haversine_km(*points[i - 1], *points[i]))
     return cum
 
@@ -861,27 +922,30 @@ def _project_onto_route(
     points: list[tuple[float, float]], cumulative: list[float],
 ) -> tuple[float, float]:
     """
-    Find the closest point on the route to a given station.
+    Finds where a fuel station sits relative to the driving route.
 
-    Returns:
-      route_km    — how far along the route (in km) the closest point is
-      offroad_km  — how far the station is from that closest point (detour distance)
+    We loop through every waypoint on the route and find the one closest to the station.
+    Then we return:
+    - route_km: how many km from the start that closest waypoint is (the station's position on the route)
+    - offroad_km: how far the station is from the route line (its detour distance)
 
-    This lets us sort stations by their position along the route, and filter out
-    stations that are too far off the road to be worth stopping at.
+    This lets us filter out stations that are too far off the road, and sort the
+    remaining stations in the order you'd encounter them while driving.
     """
-    best_dist = float("inf")
+    best_dist = float("inf")  # start with "infinity" so any real distance will be smaller
     best_km   = 0.0
+
     for i, (plat, plon) in enumerate(points):
         d = haversine_km(station_lat, station_lon, plat, plon)
         if d < best_dist:
             best_dist = d
-            best_km   = cumulative[i]
-    return best_km, best_dist
+            best_km   = cumulative[i]  # remember how far along the route this point is
+
+    return best_km, best_dist  # position along route, distance from route
 
 
 # ---------------------------------------------------------------------------
-# Corridor station search — find priced stations along the route
+# Search for all fuel stations within a band (corridor) around the route
 # ---------------------------------------------------------------------------
 
 def stations_along_route(
@@ -892,101 +956,106 @@ def stations_along_route(
     progress_callback=None,
 ) -> tuple[list[dict], list[str]]:
     """
-    Find all priced fuel stations within a corridor around the driving route.
+    Finds all priced fuel stations within a certain distance of the driving route.
 
-    Strategy:
-      1. Pick evenly-spaced sample points along the route every `sample_interval_km`.
-      2. Call gather_all() at each sample point to fetch nearby stations.
-      3. Discard stations farther than `corridor_km` from the route line.
-      4. Deduplicate: the same station may appear at multiple sample points.
-      5. Sort stations by their position along the route (route_km).
+    How it works:
+    1. Pick evenly-spaced "sample points" along the route (every ~20 km by default).
+    2. At each sample point, search for nearby stations using gather_all().
+    3. For each station found, check if it's within corridor_km of the route line.
+    4. Remove duplicate stations (the same station might appear near multiple sample points).
+    5. Return the stations sorted in driving order (closest to start first).
 
-    The result is a list of station dicts with two extra fields added:
-      route_km   — position along the route where you would stop (km from start)
-      offroad_km — how far off the main road the station is
+    We run all the API calls in parallel using threads so the whole thing is much faster.
     """
-    cumulative = _cumulative_km(route.points)
+    cumulative = _cumulative_km(route.points)  # get the km position of every waypoint
 
-    # Build a list of indices into route.points, one per sample interval
-    sample_indices: list[int] = [0]
+    # pick which route waypoints to use as sample points
+    # we start at the beginning and add one every sample_interval_km
+    sample_indices: list[int] = [0]  # always start from the first point
     next_target = sample_interval_km
     for i, c in enumerate(cumulative):
         if c >= next_target:
             sample_indices.append(i)
             next_target += sample_interval_km
-    # Always include the final point so we don't miss stations near the destination
+
+    # always include the very last point so we find stations near the destination
     if sample_indices[-1] != len(route.points) - 1:
         sample_indices.append(len(route.points) - 1)
 
-    # Use a slightly larger API radius than the corridor to catch stations
-    # that are near the line but might be just outside a tight radius query
+    # we search with a slightly larger radius than the corridor width
+    # so we don't miss stations that are just barely within the corridor
     api_radius_km = max(corridor_km * 2, 8)
 
-    seen: set[tuple[float, float]] = set()  # tracks (lat, lon) pairs already added
+    seen: set[tuple[float, float]] = set()  # set of (lat, lon) pairs we've already added
     found: list[dict] = []
     warnings: list[str] = []
 
-    # Fetch all waypoints in parallel instead of sequentially.
-    # ThreadPoolExecutor spawns worker threads — each thread calls gather_all() for
-    # one waypoint while the others run concurrently. For a 600 km route this turns
-    # ~30 sequential API calls into a single parallel batch, cutting wait time
-    # from ~60 s down to roughly the time of the single slowest call.
+    # run all API calls in parallel using a thread pool
+    # without this, a 600 km route with 30 sample points would take ~60 seconds sequentially
+    # with parallel execution it takes about as long as a single API call (~2-3 seconds)
     waypoint_coords = [route.points[idx] for idx in sample_indices]
     total = len(waypoint_coords)
+
+    # pre-fill the results list with empty FetchResults (one slot per waypoint)
     results_ordered: list[FetchResult] = [FetchResult()] * total
 
     with ThreadPoolExecutor(max_workers=8) as executor:
-        # Submit one task per waypoint, keyed by its index so we can order results
+        # submit one gather_all() call per waypoint; store future -> index mapping
         future_to_n = {
             executor.submit(gather_all, plat, plon, api_radius_km, fuel_type): n
             for n, (plat, plon) in enumerate(waypoint_coords)
         }
         completed = 0
+        # as_completed() yields futures as they finish (not necessarily in submission order)
         for future in as_completed(future_to_n):
-            n = future_to_n[future]
-            results_ordered[n] = future.result()
+            n = future_to_n[future]           # which waypoint index this result belongs to
+            results_ordered[n] = future.result()  # store result in the correct slot
             completed += 1
             if progress_callback:
-                # Update progress bar from the main thread as each future finishes
+                # tell the UI how many waypoints we've processed (for the progress bar)
                 progress_callback(completed - 1, total)
 
-    # Process results in route order (deduplicate across all waypoints)
+    # now process results in route order (not completion order)
     for result in results_ordered:
-        # Deduplicate warning messages
+        # collect unique warnings (avoid showing the same warning multiple times)
         for w in result.warnings:
             if w not in warnings:
                 warnings.append(w)
 
         for s in result.stations:
+            # we need a price to compare stations - skip if there's no price
             if s["price"] is None:
-                continue  # corridor optimiser needs actual prices to compare
+                continue
 
-            # Deduplicate stations by rounded coordinates (4 decimal places ≈ 11m)
+            # deduplicate: if we've already added this station (from a nearby sample point),
+            # skip it. We round to 4 decimal places which is about 11 metres of precision.
             key = (round(s["lat"], 4), round(s["lon"], 4))
             if key in seen:
                 continue
             seen.add(key)
 
-            # Find where this station projects onto the route
+            # find where this station sits on the route
             route_km, offroad_km = _project_onto_route(
                 s["lat"], s["lon"], route.points, cumulative
             )
-            if offroad_km > corridor_km:
-                continue  # station is too far off the road
 
-            # Add route position fields to the station dict
-            enriched = dict(s)
-            enriched["route_km"]   = route_km
-            enriched["offroad_km"] = offroad_km
+            # skip stations that are too far off the road (e.g. behind a mountain)
+            if offroad_km > corridor_km:
+                continue
+
+            # add the route position info to a copy of the station dict
+            enriched = dict(s)           # copy so we don't modify the cached original
+            enriched["route_km"]   = route_km    # km from start where you'd stop
+            enriched["offroad_km"] = offroad_km  # km off the main road
             found.append(enriched)
 
-    # Sort stations in driving order (by position along the route)
+    # sort stations by their position along the route (so we process them in driving order)
     found.sort(key=lambda s: s["route_km"])
     return found, warnings
 
 
 # ---------------------------------------------------------------------------
-# Cost-optimal refuel planning — the "gas station problem" algorithm
+# Fuel cost optimisation — find the cheapest combination of stops
 # ---------------------------------------------------------------------------
 
 def plan_trip(
@@ -997,29 +1066,26 @@ def plan_trip(
     consumption_l_per_100km: float,
 ) -> TripPlan:
     """
-    Find the cheapest set of refuel stops for a given route.
+    Finds the cheapest set of refuelling stops for a road trip.
 
-    This implements the classical "Gas Station Problem" greedy algorithm
-    (Khuller, Mitchell & Vazirani 2007). The rule at each station is:
+    This uses a well-known greedy algorithm called the "Gas Station Problem":
 
-      - If a CHEAPER station is reachable on our current tank:
-          Buy just enough fuel to reach that cheaper station.
-          (No point paying more here when cheaper fuel is ahead.)
+    The core idea is simple: if there's a cheaper station coming up that you can reach,
+    only buy enough fuel to get there. If no cheaper station is in range, fill up now
+    because this is the cheapest fuel you'll see for a while.
 
-      - If NO cheaper station is reachable:
-          Fill the tank completely.
-          (Current station is the cheapest option in range — stock up now.)
+    The destination is added as a fake station with price=0 so the algorithm knows
+    to stop buying fuel once you can reach the end.
 
-    The destination is added as a virtual "free" station (price = 0) so the
-    algorithm naturally stops buying fuel once the destination is reachable.
-
-    Returns TripPlan with feasible=False if a gap between stations exceeds
-    the vehicle's maximum range on a full tank.
+    Returns a TripPlan with feasible=False if the tank isn't big enough to bridge a gap.
     """
+    # how many litres the car burns per km (e.g. 6.5L/100km -> 0.065 L/km)
     consumption_per_km = consumption_l_per_100km / 100.0
-    fuel_range_km = tank_capacity_l / consumption_per_km  # max range on a full tank
 
-    # Validate inputs
+    # the furthest the car can go on a full tank
+    fuel_range_km = tank_capacity_l / consumption_per_km
+
+    # sanity check the inputs
     if tank_capacity_l <= 0 or consumption_l_per_100km <= 0:
         return TripPlan([], 0.0, total_distance_km, current_fuel_l, False,
                         "Tank capacity and consumption must be positive.")
@@ -1027,35 +1093,40 @@ def plan_trip(
         return TripPlan([], 0.0, total_distance_km, current_fuel_l, False,
                         "Current fuel exceeds tank capacity.")
 
-    # Add the destination as a virtual station with price=0 at the end of the route
+    # add the destination as a virtual "free" station at the end
+    # the algorithm will naturally stop buying fuel once it can reach this station
     DEST = {
         "name": "Destination", "lat": None, "lon": None,
         "price": 0.0, "route_km": total_distance_km,
         "country": "-", "brand": "",
     }
-    # Only include stations that are strictly between start and destination
+
+    # filter out stations at the very start or end (only keep stations between start and destination)
     points = [s for s in stations if 0 < s["route_km"] < total_distance_km] + [DEST]
 
-    pos_km = 0.0          # current position along the route (km from start)
-    fuel_l = current_fuel_l
-    stops: list[RefuelStop] = []
+    pos_km = 0.0           # current position on the route in km from start
+    fuel_l = current_fuel_l  # current amount of fuel in the tank
+    stops: list[RefuelStop] = []  # list of stops we decide to make
 
-    while pos_km < total_distance_km - 1e-6:
-        # Check if we are currently standing at a station
+    # keep driving until we reach the destination
+    while pos_km < total_distance_km - 1e-6:  # 1e-6 is a tiny buffer for floating point errors
+
+        # check if we are currently at a fuel station
         current = next(
             (p for p in points if abs(p["route_km"] - pos_km) < 1e-3 and p is not DEST),
-            None
+            None  # None if we're not at any station
         )
 
-        # Maximum fuel we can have at this position
+        # calculate how far we can reach from here
+        # if we're at a station, assume we could fill up to a full tank
         max_fuel_here = tank_capacity_l if current is not None else fuel_l
         reach_km = pos_km + max_fuel_here / consumption_per_km
 
-        # All stations/destination we can reach from here
+        # find all stations (and the destination) that we can reach from here
         candidates = [p for p in points if pos_km < p["route_km"] <= reach_km + 1e-6]
 
         if not candidates:
-            # Even a full tank can't reach the next station — trip is infeasible
+            # even a completely full tank can't reach the next station - the trip is impossible
             ahead = [p for p in points if p["route_km"] > pos_km]
             if not ahead:
                 return TripPlan(stops, sum(s.cost for s in stops), total_distance_km,
@@ -1069,46 +1140,58 @@ def plan_trip(
                             f"tank range of {fuel_range_km:.0f} km.")
 
         if current is None:
-            # We're at the start and not at a station — just drive to the cheapest reachable point
+            # we're at the start (not at any station yet)
+            # just drive to the cheapest station we can currently reach
             target = min(candidates, key=lambda p: p["price"])
             distance = target["route_km"] - pos_km
             fuel_l -= distance * consumption_per_km
             pos_km = target["route_km"]
-            continue
+            continue  # restart the loop at the new position
 
-        # Apply the greedy lookahead rule
+        # we're at a station - apply the greedy algorithm decision:
+        # look for a cheaper station we can reach from here on our current fuel + a full tank
         cheaper_ahead = [p for p in candidates if p["price"] < current["price"]]
 
         if cheaper_ahead:
-            # A cheaper station is in range — buy just enough to reach it
-            next_cheaper = min(cheaper_ahead, key=lambda p: p["route_km"])
+            # there's a cheaper station in range - buy just enough to get there
+            next_cheaper = min(cheaper_ahead, key=lambda p: p["route_km"])  # take the nearest cheaper one
             distance     = next_cheaper["route_km"] - pos_km
-            fuel_needed  = distance * consumption_per_km
-            buy          = max(0.0, fuel_needed - fuel_l)  # only buy what we're short
+            fuel_needed  = distance * consumption_per_km    # how much fuel we need to reach it
+            buy          = max(0.0, fuel_needed - fuel_l)   # only buy what we don't already have
             target       = next_cheaper
         else:
-            # Nothing cheaper in range — fill up and drive as far as possible
-            buy      = tank_capacity_l - fuel_l
-            target   = max(candidates, key=lambda p: p["route_km"])
+            # no cheaper station in range - fill up completely before continuing
+            buy      = tank_capacity_l - fuel_l  # top up to a full tank
+            target   = max(candidates, key=lambda p: p["route_km"])  # drive as far as possible
             distance = target["route_km"] - pos_km
 
+        # record this refuel stop if we actually need to buy fuel
         if buy > 0:
+            # don't stop for tiny amounts - it's not worth pulling off the road for less than 10L
+            # we round up to the minimum, but never more than what fits in the tank
+            MIN_FILL_L = 10.0
+            buy = max(buy, MIN_FILL_L)
+            buy = min(buy, tank_capacity_l - fuel_l)  # make sure we don't overfill the tank
             stops.append(RefuelStop(
-                station=current, liters=buy, cost=buy * current["price"],
+                station=current,
+                liters=buy,
+                cost=buy * current["price"],  # total cost = litres × price per litre
             ))
-            fuel_l += buy
+            fuel_l += buy  # add the purchased fuel to the tank
 
-        # Drive to the chosen target
+        # drive to the chosen next point and update position + fuel level
         fuel_l -= distance * consumption_per_km
         pos_km  = target["route_km"]
 
-        # Correct tiny floating-point errors (e.g. -0.000001 litres)
+        # floating point arithmetic can leave tiny negative values like -0.0000001
+        # this just rounds those to zero to avoid false "out of fuel" errors
         if -1e-6 < fuel_l < 0:
             fuel_l = 0.0
         if fuel_l < 0:
             return TripPlan(stops, sum(s.cost for s in stops), total_distance_km,
                             fuel_l, False, "Ran out of fuel - refuel logic error.")
 
+    # we reached the destination - return the complete plan
     return TripPlan(
         stops=stops,
         total_cost=sum(s.cost for s in stops),
@@ -1125,53 +1208,51 @@ def plan_trip(
 def build_map(stations: list[dict], origin_lat: float, origin_lon: float,
               fuel_type: str) -> folium.Map:
     """
-    Build the interactive map for Mode 01 (Find nearby).
-
-    Markers are colour-coded by price tier:
-      Green  = cheapest third of stations
-      Orange = middle third
-      Red    = most expensive third
-      Grey   = no price data (Switzerland, or Austria outside reporting hours)
+    Creates the interactive map for Mode 1 (Find nearby).
+    Markers are colour coded by price:
+    green = cheapest third, orange = middle third, red = most expensive, grey = no price.
     """
-    # Use Mapbox Streets tiles if a token is available, else fall back to OpenStreetMap
+    # use Mapbox Streets map tiles if we have a token, otherwise fall back to free OpenStreetMap tiles
     tile_url = _mapbox_tile_url()
     fmap = folium.Map(
-        location=[origin_lat, origin_lon], zoom_start=11,
+        location=[origin_lat, origin_lon],  # centre the map on the search location
+        zoom_start=11,                       # zoom level (higher = more zoomed in)
         tiles=tile_url or "OpenStreetMap",
         attr='© <a href="https://www.mapbox.com/">Mapbox</a>' if tile_url else "© OpenStreetMap contributors",
         max_zoom=22 if tile_url else 18,
     )
 
-    # Blue home marker for the search location
+    # add a blue "home" marker at the search location
     folium.Marker(
         [origin_lat, origin_lon],
         popup="Your search location",
-        icon=folium.Icon(color="blue", icon="home", prefix="fa"),
+        icon=folium.Icon(color="blue", icon="home", prefix="fa"),  # "fa" = Font Awesome icon set
     ).add_to(fmap)
 
     if not stations:
-        return fmap
+        return fmap  # nothing to show - return the empty map
 
-    # Calculate price tercile thresholds for colour-coding
+    # calculate the price thresholds that divide stations into three equal groups
     priced = sorted(s["price"] for s in stations if s["price"] is not None)
     if len(priced) >= 3:
-        q_low  = priced[len(priced) // 3]       # top of the cheap third
-        q_high = priced[2 * len(priced) // 3]   # top of the middle third
+        q_low  = priced[len(priced) // 3]       # top boundary of the cheap third
+        q_high = priced[2 * len(priced) // 3]   # top boundary of the middle third
     else:
-        q_low = q_high = float("inf")  # not enough stations to split into thirds
+        q_low = q_high = float("inf")  # if fewer than 3 stations, don't try to split into thirds
 
+    # add a circle marker for each station
     for s in stations:
-        # Assign colour based on price tier
+        # decide the marker colour based on which price tier the station falls into
         if s["price"] is None:
             color, price_str = "gray", "no price data"
         elif s["price"] <= q_low:
-            color, price_str = "green", f"{s['price']:.3f}"
+            color, price_str = "green", f"{s['price']:.3f}"   # cheap
         elif s["price"] <= q_high:
-            color, price_str = "orange", f"{s['price']:.3f}"
+            color, price_str = "orange", f"{s['price']:.3f}"  # middle
         else:
-            color, price_str = "red", f"{s['price']:.3f}"
+            color, price_str = "red", f"{s['price']:.3f}"     # expensive
 
-        # HTML content shown when the user clicks a marker
+        # this HTML string shows up in a popup when the user clicks on the marker
         popup_html = (
             f"<b>{s['name']}</b><br>"
             f"Brand: {s['brand'] or '-'}<br>"
@@ -1195,44 +1276,41 @@ def build_map(stations: list[dict], origin_lat: float, origin_lon: float,
 def build_trip_map(route: Route, all_corridor_stations: list[dict],
                    plan: TripPlan, fuel_type: str) -> folium.Map:
     """
-    Build the interactive map for Mode 02 (Trip planner).
-
-    Shows:
-      - A blue polyline for the driving route
-      - Green flag markers at the start and end
-      - Large green pin markers for the chosen refuel stops (numbered)
-      - Small grey dots for other priced stations along the corridor
+    Creates the interactive map for Mode 2 (Trip planner).
+    Shows a blue route line, green pins for chosen refuel stops,
+    and small grey dots for all other stations along the corridor.
     """
     if not route.points:
-        return folium.Map()
+        return folium.Map()  # return a blank map if there's no route
 
-    # Centre the map on the route's midpoint
+    # centre the map roughly in the middle of the route
     mid = route.points[len(route.points) // 2]
     tile_url = _mapbox_tile_url()
     fmap = folium.Map(
-        location=mid, zoom_start=7,
+        location=mid, zoom_start=7,  # zoom out more than Mode 1 since we're showing a whole route
         tiles=tile_url or "OpenStreetMap",
         attr='© <a href="https://www.mapbox.com/">Mapbox</a>' if tile_url else "© OpenStreetMap contributors",
         max_zoom=22 if tile_url else 18,
     )
 
-    # Draw the full driving route as a blue line
+    # draw the driving route as a blue polyline (connected set of line segments)
     folium.PolyLine(route.points, color="#185FA5", weight=5, opacity=0.7).add_to(fmap)
 
-    # Start and destination markers
+    # add start and destination markers
     folium.Marker(route.points[0], popup="Start",
                   icon=folium.Icon(color="green", icon="play", prefix="fa")).add_to(fmap)
     folium.Marker(route.points[-1], popup="Destination",
                   icon=folium.Icon(color="red", icon="flag-checkered", prefix="fa")).add_to(fmap)
 
-    # Collect coordinates of chosen stops so we can skip them in the grey dot loop
+    # build a set of (lat, lon) coordinates for the chosen stops
+    # we use this to avoid drawing them as grey dots in the next loop
     chosen_keys = {(s.station["lat"], s.station["lon"]) for s in plan.stops
                    if s.station["lat"] is not None}
 
-    # Draw all other corridor stations as small grey dots (not chosen by optimiser)
+    # draw all corridor stations that were NOT chosen as small grey dots
     for s in all_corridor_stations:
         if (s["lat"], s["lon"]) in chosen_keys:
-            continue
+            continue  # this station is a chosen stop, we'll draw it as a green pin below
         folium.CircleMarker(
             location=[s["lat"], s["lon"]],
             radius=4,
@@ -1245,11 +1323,11 @@ def build_trip_map(route: Route, all_corridor_stations: list[dict],
             ),
         ).add_to(fmap)
 
-    # Draw chosen refuel stops as large numbered green markers
+    # draw the chosen refuel stops as numbered green gas pump markers
     for n, stop in enumerate(plan.stops, start=1):
         s = stop.station
         if s["lat"] is None:
-            continue  # skip the virtual destination sentinel
+            continue  # skip the virtual destination station (it has no real coordinates)
         popup_html = (
             f"<b>Stop {n}: {s['name']}</b><br>"
             f"{fuel_type}: <b>{s['price']:.3f}</b> / L<br>"
@@ -1262,26 +1340,23 @@ def build_trip_map(route: Route, all_corridor_stations: list[dict],
             location=[s["lat"], s["lon"]],
             popup=folium.Popup(popup_html, max_width=280),
             icon=folium.Icon(color="green", icon="gas-pump", prefix="fa"),
-            tooltip=f"Stop {n} - {stop.liters:.1f} L",
+            tooltip=f"Stop {n} - {stop.liters:.1f} L",  # shown on hover
         ).add_to(fmap)
 
     return fmap
 
 
 # ---------------------------------------------------------------------------
-# Page renderers — one function per app mode
+# Page renderer functions — one per app mode
 # ---------------------------------------------------------------------------
 
 def render_static_mode() -> None:
     """
-    Mode 01 — Find nearby fuel stations.
-
-    Flow:
-      1. User types a location into the autocomplete search box.
-      2. Mapbox Geocoding API returns suggestions as they type.
-      3. User selects a suggestion and clicks Search.
-      4. We call all three country fetchers in parallel (cached) and display results.
+    Renders Mode 1 - Find nearby fuel stations.
+    Shows the header, search inputs, then the map and table with results.
+    Results are stored in st.session_state so they survive Streamlit reruns.
     """
+    # inject the page header HTML
     st.markdown(
         '<div class="ff-page-header">'
         '<h1>Find nearby fuel</h1>'
@@ -1290,11 +1365,13 @@ def render_static_mode() -> None:
         unsafe_allow_html=True,
     )
 
-    # --- Input row ---
+    # lay out the input controls in a three-column row
+    # the numbers [3, 1, 1] set the relative widths (location box is 3x wider)
     col1, col2, col3 = st.columns([3, 1, 1])
     with col1:
-        # st_searchbox calls _mapbox_suggestions() on every keystroke and shows a dropdown.
-        # The return value is the place name the user selected (or None if nothing selected).
+        # st_searchbox shows an input field with autocomplete dropdown
+        # it calls _mapbox_suggestions() every time the user types a character
+        # it returns the place name string that was selected, or None if nothing was chosen yet
         selected_place = st_searchbox(
             _mapbox_suggestions,
             key="static_location_search",
@@ -1308,19 +1385,21 @@ def render_static_mode() -> None:
     with col3:
         radius = st.slider("Radius (km)", 1, MAX_RADIUS_KM, DEFAULT_RADIUS_KM)
 
+    # the search button - type="primary" gives it the orange style from our CSS
     search_clicked = st.button("Search", type="primary", key="static_search")
 
-    # Only run the search when the button is clicked
+    # this block only runs when the button is clicked
+    # Streamlit re-runs the whole script on every interaction, so we need this check
     if search_clicked:
         if not selected_place:
             st.error("Please select a location from the dropdown.")
-            st.session_state.pop("search_result", None)
+            st.session_state.pop("search_result", None)  # clear any old results
             return
 
-        # Look up coordinates from the cache (set by _mapbox_suggestions when the
-        # user typed and selected). If somehow not cached, fall back to geocode().
+        # look up coordinates - they should already be in the cache if the user used autocomplete
         geo = _geo_cache.get(selected_place)
         if geo is None:
+            # not in cache - call the geocoding API
             with st.spinner(f"Geocoding '{selected_place}'..."):
                 geo = geocode(selected_place)
         if geo is None:
@@ -1328,12 +1407,13 @@ def render_static_mode() -> None:
             st.session_state.pop("search_result", None)
             return
 
-        # Fetch stations from all three countries
+        # fetch stations from all three countries
         with st.spinner("Fetching live prices from DE / AT / CH..."):
             result = gather_all(geo.lat, geo.lon, radius, fuel_type)
 
-        # Store results in session_state so they survive Streamlit reruns
-        # (Streamlit reruns the entire script on every user interaction)
+        # store the results in Streamlit's session_state
+        # session_state persists between reruns (unlike regular variables which reset each time)
+        # this is how we keep the results on screen when the user interacts with other UI elements
         st.session_state.search_result = {
             "geo":       geo,
             "stations":  result.stations,
@@ -1341,26 +1421,29 @@ def render_static_mode() -> None:
             "fuel_type": fuel_type,
         }
 
-    # --- Display results (from session_state, persists across reruns) ---
+    # try to load results from session_state (they persist even if the button wasn't just clicked)
     sr = st.session_state.get("search_result")
     if not sr:
+        # no results yet - show a hint
         st.info("Enter a location above and click **Search** to find live fuel prices.")
         return
 
-    geo           = sr["geo"]
-    stations      = sr["stations"]
-    warnings      = sr["warnings"]
+    # unpack the results from the dictionary
+    geo            = sr["geo"]
+    stations       = sr["stations"]
+    warnings       = sr["warnings"]
     fuel_type_used = sr["fuel_type"]
 
+    # show the resolved address as a green success banner
     st.success(f"  {geo.address}")
 
-    # Show any non-fatal API warnings in a collapsible section
+    # if any API had issues (missing key, timeout etc.) show them in a collapsible section
     if warnings:
         with st.expander(f"  {len(warnings)} warning(s)"):
             for w in warnings:
                 st.write(f"- {w}")
 
-    # Limit display to TOP_N_RESULTS stations
+    # only show the top N results to keep the page manageable
     top = stations[:TOP_N_RESULTS]
     if not top:
         st.warning("No stations found in this radius. Try widening the search.")
@@ -1370,16 +1453,19 @@ def render_static_mode() -> None:
         f"**{len(stations)} stations** found - showing top **{len(top)}** for **{fuel_type_used}**."
     )
 
-    # Map
+    # --- MAP ---
     st.markdown('<div class="ff-section">Map</div>', unsafe_allow_html=True)
     fmap = build_map(top, geo.lat, geo.lon, fuel_type_used)
+    # st_folium renders the folium map as an interactive component in the Streamlit page
+    # returned_objects=[] means we don't need to capture any click events from the map
     st_folium(fmap, height=420, width='stretch', returned_objects=[])
     st.caption("Green = cheapest third | Orange = middle third | Red = most expensive | Grey = no price data")
 
-    # Table
+    # --- TABLE ---
     st.markdown('<div class="ff-section">Stations</div>', unsafe_allow_html=True)
-    df = pd.DataFrame(top)
-    df.index = df.index + 1  # start index at 1 instead of 0
+    df = pd.DataFrame(top)        # convert the list of station dicts to a pandas DataFrame
+    df.index = df.index + 1       # make the row numbers start at 1 instead of 0
+    # rename columns to be more readable and select only the ones we want to show
     df = df.rename(columns={
         "country": "Country", "name": "Station", "brand": "Brand",
         "address": "Address", "price": "Price", "distance_km": "Dist (km)",
@@ -1388,24 +1474,17 @@ def render_static_mode() -> None:
     st.dataframe(
         df, width='stretch',
         column_config={
-            "Price":      st.column_config.NumberColumn(format="%.3f"),
-            "Dist (km)":  st.column_config.NumberColumn(format="%.1f"),
+            "Price":     st.column_config.NumberColumn(format="%.3f"),  # show 3 decimal places
+            "Dist (km)": st.column_config.NumberColumn(format="%.1f"),  # show 1 decimal place
         },
     )
 
 
 def render_dynamic_mode() -> None:
     """
-    Mode 02 — Trip planner with cost-optimal refuel stops.
-
-    Flow:
-      1. User enters start and destination via autocomplete search boxes.
-      2. User enters vehicle parameters (tank size, current fuel, consumption).
-      3. On "Plan trip":
-           a. Get route from Mapbox Directions API.
-           b. Sample the route every ROUTE_SAMPLE_INTERVAL_KM and fetch stations.
-           c. Run the gas station optimisation algorithm.
-           d. Display the route map, stop table, and cost summary.
+    Renders Mode 2 - Trip planner.
+    User fills in start, destination, and vehicle details and clicks Plan trip.
+    We get a route from the API, search for stations along it, then run the optimiser.
     """
     st.markdown(
         '<div class="ff-page-header">'
@@ -1415,7 +1494,7 @@ def render_dynamic_mode() -> None:
         unsafe_allow_html=True,
     )
 
-    # --- Location inputs (autocomplete search boxes) ---
+    # two search boxes next to each other for start and destination
     col_a, col_b = st.columns(2)
     with col_a:
         start_q = st_searchbox(
@@ -1434,7 +1513,7 @@ def render_dynamic_mode() -> None:
             clear_on_submit=False,
         )
 
-    # --- Vehicle parameters ---
+    # four vehicle parameter inputs in a row
     col_c, col_d, col_e, col_f = st.columns(4)
     with col_c:
         fuel_type = st.selectbox("Fuel type", FUEL_TYPES,
@@ -1453,7 +1532,7 @@ def render_dynamic_mode() -> None:
     plan_clicked = st.button("Plan trip", type="primary", key="trip_plan")
 
     if plan_clicked:
-        # Validate inputs before making any API calls
+        # check the inputs make sense before making any API calls
         if current_fuel > tank_capacity:
             st.error("Current fuel can't exceed tank capacity.")
             return
@@ -1461,15 +1540,17 @@ def render_dynamic_mode() -> None:
             st.error("Please select both a start and a destination from the dropdowns.")
             return
 
-        # Resolve coordinates (from cache if available, else geocode)
+        # get coordinates for start and destination (from cache if possible)
         start = _geo_cache.get(start_q)
         if start is None:
             with st.spinner("Geocoding start..."):
                 start = geocode(start_q)
+
         end = _geo_cache.get(end_q)
         if end is None:
             with st.spinner("Geocoding destination..."):
                 end = geocode(end_q)
+
         if start is None:
             st.error(f"Could not find start '{start_q}'.")
             return
@@ -1477,25 +1558,28 @@ def render_dynamic_mode() -> None:
             st.error(f"Could not find destination '{end_q}'.")
             return
 
-        # Step 1: Get the driving route
+        # step 1: get the driving route from Mapbox/OSRM
         with st.spinner("Computing driving route..."):
             route = get_route(start.lat, start.lon, end.lat, end.lon)
         if route is None:
             st.error("Could not compute a route between those points.")
             return
 
-        # Step 2: Find stations along the route (slowest step — many API calls)
+        # step 2: find all priced stations within the corridor around the route
+        # this is the slowest step since it makes many parallel API calls
         progress_bar = st.progress(0.0, text="Searching for stations along the route...")
+
         def _progress(n: int, total: int) -> None:
-            # Update the progress bar after each waypoint is searched
+            # update the progress bar as each waypoint finishes
             progress_bar.progress((n + 1) / max(total, 1),
                                   text=f"Searching waypoint {n + 1} of {total}...")
+
         corridor_stations, corridor_warnings = stations_along_route(
             route, fuel_type, progress_callback=_progress,
         )
-        progress_bar.empty()
+        progress_bar.empty()  # remove the progress bar once done
 
-        # Step 3: Run the cost-optimisation algorithm
+        # step 3: run the greedy algorithm to find the cheapest combination of stops
         with st.spinner("Optimising refuel stops..."):
             plan = plan_trip(
                 stations=corridor_stations,
@@ -1505,7 +1589,7 @@ def render_dynamic_mode() -> None:
                 consumption_l_per_100km=consumption,
             )
 
-        # Store everything in session_state so results survive reruns
+        # save everything to session_state so results persist across Streamlit reruns
         st.session_state.trip_result = {
             "start":             start,
             "end":               end,
@@ -1518,7 +1602,7 @@ def render_dynamic_mode() -> None:
             "current_fuel":      current_fuel,
         }
 
-    # --- Display results ---
+    # check if we have results to display
     tr = st.session_state.get("trip_result")
     if not tr:
         st.info(
@@ -1529,6 +1613,7 @@ def render_dynamic_mode() -> None:
         )
         return
 
+    # unpack the saved results
     plan              = tr["plan"]
     route             = tr["route"]
     fuel_type_used    = tr["fuel_type"]
@@ -1545,9 +1630,8 @@ def render_dynamic_mode() -> None:
         st.error(f"Trip not feasible: {plan.message}")
         return
 
-    # --- Headline metrics ---
-    # Calculate a "baseline cost" (what you'd pay buying fuel at the corridor average)
-    # to show how much the optimiser saves compared to stopping anywhere.
+    # calculate a "baseline cost" to show how much we save vs. just stopping anywhere
+    # baseline = how much you'd spend buying fuel at the average price of all corridor stations
     fuel_needed_total = max(0.0, route.total_km * tr["consumption"] / 100.0 - tr["current_fuel"])
     if corridor_stations:
         avg_price     = sum(s["price"] for s in corridor_stations) / len(corridor_stations)
@@ -1556,22 +1640,23 @@ def render_dynamic_mode() -> None:
         avg_price     = 0.0
         baseline_cost = 0.0
 
+    # display the four summary metric cards at the top
     metrics = st.columns(4)
-    metrics[0].metric("Distance",       f"{route.total_km:,.0f} km")
-    metrics[1].metric("Total fuel cost", f"EUR{plan.total_cost:,.2f}")
-    metrics[2].metric("Refuel stops",   f"{len(plan.stops)}")
+    metrics[0].metric("Distance",        f"{route.total_km:,.0f} km")
+    metrics[1].metric("Total fuel cost",  f"EUR{plan.total_cost:,.2f}")
+    metrics[2].metric("Refuel stops",    f"{len(plan.stops)}")
     if avg_price > 0:
         savings = baseline_cost - plan.total_cost
         metrics[3].metric(
             "vs. corridor average",
             f"EUR{plan.total_cost:,.2f}",
             delta=f"-EUR{savings:,.2f}" if savings >= 0 else f"+EUR{-savings:,.2f}",
-            delta_color="inverse",  # green = we saved money (negative delta is good here)
+            delta_color="inverse",  # "inverse" means green for negative (saving money is good)
         )
     else:
         metrics[3].metric("vs. average", "-")
 
-    # --- Route map ---
+    # --- ROUTE MAP ---
     st.markdown('<div class="ff-section">Route and refuel stops</div>', unsafe_allow_html=True)
     fmap = build_trip_map(route, corridor_stations, plan, fuel_type_used)
     st_folium(fmap, height=460, width='stretch', returned_objects=[])
@@ -1580,20 +1665,21 @@ def render_dynamic_mode() -> None:
         f"{len(corridor_stations)} priced stations along the route"
     )
 
-    # --- Refuel stop table ---
+    # --- REFUEL PLAN TABLE ---
     if plan.stops:
         st.markdown('<div class="ff-section">Refuel plan</div>', unsafe_allow_html=True)
         rows = []
+        # build a list of dicts, one per stop, for the table
         for n, stop in enumerate(plan.stops, start=1):
             s = stop.station
             rows.append({
-                "#":           n,
-                "At km":       f"{s['route_km']:.0f}",
-                "Station":     s["name"],
-                "Country":     s["country"],
+                "#":             n,
+                "At km":         f"{s['route_km']:.0f}",
+                "Station":       s["name"],
+                "Country":       s["country"],
                 "Price (EUR/L)": s["price"],
-                "Refuel (L)":  stop.liters,
-                "Cost (EUR)":  stop.cost,
+                "Refuel (L)":    stop.liters,
+                "Cost (EUR)":    stop.cost,
             })
         df = pd.DataFrame(rows)
         st.dataframe(
@@ -1610,6 +1696,7 @@ def render_dynamic_mode() -> None:
             "cheaper option, and fills up only when nothing cheaper is reachable."
         )
     else:
+        # if no stops were needed, just show a message
         st.info(
             f"No refuelling needed - your starting fuel covers the whole trip "
             f"(arriving with **{plan.fuel_remaining_l:.1f} L** to spare)."
@@ -1621,33 +1708,35 @@ def render_dynamic_mode() -> None:
 # ===========================================================================
 
 def main() -> None:
-    """
-    App entry point — configures the page and routes to the correct mode.
-    Called automatically by Streamlit when the script runs.
-    """
+    """Sets up the page, injects CSS, builds the sidebar, and calls the right page renderer."""
     st.set_page_config(
         page_title="FuelFinder - DACH fuel prices",
         page_icon="",
-        layout="wide",  # use the full browser width
+        layout="wide",  # "wide" uses the full browser width instead of the narrow default
     )
 
-    # Inject the custom CSS once per page load
+    # inject the custom CSS (defined at the top of the file) into the page HTML
     st.markdown(_CSS, unsafe_allow_html=True)
 
-    # Sidebar — navigation and data source credits
+    # build the sidebar - this runs every time the page loads
     with st.sidebar:
+        # app logo / title
         st.markdown(
             '<p class="ff-brand-name">FuelFinder</p>'
             '<p class="ff-brand-tag">Live prices across DE &middot; AT &middot; CH</p>',
             unsafe_allow_html=True,
         )
         st.divider()
+
+        # mode selector - user picks between the two app modes here
         mode = st.radio(
             "Mode",
             ["Find nearby", "Trip planner"],
-            label_visibility="collapsed",
+            label_visibility="collapsed",  # hide the "Mode" label since it's obvious from context
         )
         st.divider()
+
+        # credits and data sources at the bottom of the sidebar
         st.markdown(
             '<div class="ff-sidebar-footer">'
             'Data: <a href="https://creativecommons.tankerkoenig.de/" target="_blank">Tankerkoenig</a> &middot; '
@@ -1659,14 +1748,13 @@ def main() -> None:
             unsafe_allow_html=True,
         )
 
-    # Route to the correct page based on sidebar selection
+    # call the correct page renderer depending on which mode the user selected
     if mode == "Find nearby":
         render_static_mode()
     else:
         render_dynamic_mode()
 
 
-# Standard Python idiom: only run main() when this file is executed directly,
-# not when it is imported as a module.
+# run the whole thing
 if __name__ == "__main__":
     main()

@@ -3,19 +3,88 @@ Group 4495
 
 ## FuelFinder — Live Fuel Prices for DE / AT / CH
 
-FuelFinder is a Streamlit web app for comparing live fuel prices across Germany, Austria, and Switzerland. It offers two modes: a **nearby station finder** that maps the cheapest stations around any location, and a **trip planner** that calculates the cost-optimal refuel stops along a driving route.
+FuelFinder is a Streamlit web app for comparing live fuel prices across Germany, Austria, and Switzerland. It has two modes: a **nearby station finder** that shows the cheapest stations around any location on a colour-coded map, and a **trip planner** that calculates the cheapest places to refuel along a driving route.
 
 This application was developed as part of the group project for the course "Programming - Introduction Level" at the University of St. Gallen.
 
-## Features
+---
 
-- **Live price data** — Tankerkönig API (DE), Spritpreisrechner.at (AT), OpenStreetMap Overpass API (CH)
-- **Address autocomplete** — Mapbox Geocoding API with instant suggestions as you type
-- **Interactive map** — Mapbox Streets tiles with colour-coded station markers (green = cheapest third, orange = middle, red = most expensive, grey = no data)
-- **Trip planner** — enter start and destination, specify tank size, current fuel, and consumption; the app computes a driving route via Mapbox Directions, searches for priced stations along the corridor, and picks the cheapest refuel stops using the classical Gas Station Problem greedy algorithm
-- **Parallel API calls** — all route waypoints are searched simultaneously using `ThreadPoolExecutor`, cutting trip planner load time significantly
-- **Cost summary** — total fuel cost, number of stops, and savings vs. the corridor average price
-- **Cross-border search** — covers DE, AT, and CH in one query; bounding-box pre-checks skip irrelevant country APIs for faster results
+## What the App Does
+
+### Mode 1 — Find Nearby Fuel
+
+The user types a city, postcode, or address into the search box. The app converts that text into GPS coordinates (geocoding), then calls three different APIs simultaneously to collect all open fuel stations within the chosen radius:
+
+- **Germany**: Tankerkönig API — returns live prices updated every few minutes
+- **Austria**: Spritpreisrechner.at (E-Control) — returns prices where available (Austrian law limits price changes to three fixed times per day: 12:00, 14:00, and 16:00)
+- **Switzerland**: OpenStreetMap Overpass API — returns station locations only (Switzerland has no public fuel price database)
+
+All results are merged into a single sorted list. The map shows each station as a colour-coded dot:
+- **Green** = cheapest third of stations found
+- **Orange** = middle third
+- **Red** = most expensive third
+- **Grey** = no price data available
+
+### Mode 2 — Trip Planner
+
+The user enters a start location, a destination, and their vehicle's fuel parameters (tank size, current fuel level, fuel consumption in L/100 km). The app then runs a multi-step process:
+
+1. **Route calculation** — fetches a real driving route from Mapbox Directions (or OSRM as a fallback). The route is a sequence of GPS waypoints covering the full road path.
+
+2. **Station search along the route** — the route is divided into evenly-spaced sample points (every ~20 km). At each sample point, all three country APIs are called in parallel to find nearby stations. Any station further than 5 km from the route line is discarded. Duplicates (the same station appearing near multiple sample points) are removed. The result is a list of all priced stations along the corridor, sorted in driving order.
+
+3. **Cost optimisation** — the app runs the refuel planning algorithm (see below) to decide exactly where to stop and how many litres to buy at each stop.
+
+4. **Results** — the route map shows the full driving path, green pins for chosen refuel stops, and grey dots for all other stations that were found. A table below lists each stop with the price, litres purchased, and cost.
+
+---
+
+## The Refuel Planning Algorithm
+
+The trip planner uses a classic algorithm known as the **"Gas Station Problem"** (greedy approach). The core insight is:
+
+> If a cheaper station is reachable on your current fuel, there is no point paying more now. Only fill up here if there is nothing cheaper within reach.
+
+### How it works step by step
+
+The algorithm simulates driving the route from start to destination. At each fuel station it encounters, it makes one of two decisions:
+
+**Case 1 — A cheaper station is in range:**
+Buy just enough fuel to reach that cheaper station. Don't buy more than needed here since the cheaper fuel is coming up.
+
+**Case 2 — No cheaper station is in range:**
+Fill the tank completely. This is the cheapest fuel available for the foreseeable stretch of the route, so it makes sense to stock up.
+
+The destination is added as a virtual station with a price of €0/L. This means the algorithm naturally stops buying fuel once the destination can be reached — there is no point filling up beyond what is needed to arrive.
+
+### Minimum fill-up rule
+
+A practical constraint is added on top of the algorithm: **each stop must purchase at least 10 litres**. Without this limit, the algorithm might suggest stopping for 1–3 litres just to save a few cents, which is not realistic. If the calculated amount to buy is less than 10 L, it is rounded up to 10 L (or however much fits in the tank, whichever is smaller).
+
+### Feasibility check
+
+If any gap between consecutive stations along the route is longer than the car's maximum range on a full tank, the algorithm returns the trip as **infeasible** and tells the user which gap is the problem.
+
+### Example
+
+Imagine a 400 km trip with stations at the following prices and positions:
+
+| Position (km) | Price (€/L) |
+|---|---|
+| 50 | 1.85 |
+| 120 | 1.72 |
+| 230 | 1.90 |
+| 310 | 1.68 |
+| 380 | 1.75 |
+
+With a 50 L tank, 10 L of starting fuel, and 7 L/100 km consumption:
+
+- At km 50 (€1.85): a cheaper station at km 120 is in range → buy just enough to get there
+- At km 120 (€1.72): the station at km 310 (€1.68) is cheaper but too far away on current fuel → fill up completely since nothing cheaper is reachable
+- At km 230 (€1.90): skip — we have enough fuel to reach km 310
+- At km 310 (€1.68): cheapest station on the route → fill up to make it to the destination
+
+---
 
 ## Technical Requirements
 
@@ -24,6 +93,8 @@ This application was developed as part of the group project for the course "Prog
 3. **Data visualisation** — interactive Folium/Mapbox map with colour-coded price tiers and route polyline
 4. **User interaction** — address autocomplete search, fuel type selector, radius slider, vehicle parameter inputs
 5. **Documentation** — detailed inline comments throughout the source code
+
+---
 
 ## Installation
 
@@ -61,19 +132,7 @@ streamlit run main.py
 
 The app opens automatically at `http://localhost:8501`.
 
-## Usage
-
-### Find nearby (Mode 1)
-1. Type a city, postcode, or address into the search box and select a suggestion
-2. Choose a fuel type (E5, E10, Diesel) and search radius
-3. Click **Search** — live prices load from all three countries
-4. Explore the colour-coded map and station table
-
-### Trip planner (Mode 2)
-1. Enter a start location and destination via the autocomplete search boxes
-2. Set your fuel type, tank capacity, current fuel level, and consumption (L/100 km)
-3. Click **Plan trip** — the app fetches a driving route, searches for stations along the corridor, and runs the cost optimisation
-4. Review the route map, headline metrics, and the detailed refuel plan table
+---
 
 ## Data Source Limitations
 
@@ -82,6 +141,8 @@ The app opens automatically at `http://localhost:8501`.
 | Tankerkönig | DE | Yes | Requires free API key; radius capped at 25 km |
 | Spritpreisrechner.at | AT | Yes | No key needed; prices may be empty outside 12:00/14:00/16:00 reporting windows |
 | OpenStreetMap Overpass | CH | Locations only | No public Swiss price database |
+
+---
 
 ## Project Structure
 
@@ -95,6 +156,8 @@ FuelFinder/
     └── config.toml      # Dark theme, primary colour, font settings
 ```
 
+---
+
 ## External Dependencies
 
 - **streamlit** — web app framework
@@ -107,6 +170,8 @@ FuelFinder/
 - **python-dotenv** — loads API keys from `.env`
 - **certifi** — trusted SSL certificate bundle (fixes macOS SSL errors)
 
+---
+
 ## Sources and References
 
 - **Tankerkönig API**: https://creativecommons.tankerkoenig.de/
@@ -118,6 +183,8 @@ FuelFinder/
 - **GeoPy Documentation**: https://geopy.readthedocs.io/
 - **Nominatim / OpenStreetMap**: https://nominatim.org/
 - **ChatGPT and GitHub Copilot**: Code optimisation, debugging, and README structuring
+
+---
 
 ## Potential Future Features
 
