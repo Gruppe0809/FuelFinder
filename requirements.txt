@@ -6,3 +6,4 @@ requests
 pandas
 geopy
 python-dotenv
+certifi
