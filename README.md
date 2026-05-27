@@ -34,7 +34,7 @@ This application was developed as part of the group project for the course "Prog
 - A free Tankerkönig API key → [register here](https://creativecommons.tankerkoenig.de/)
 - A free Mapbox access token → [register here](https://account.mapbox.com/)
 
-### Steps
+### Steps (to be taken in Terminal)
 
 1. Clone the repository
    ```
