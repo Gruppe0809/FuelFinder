@@ -31,15 +31,13 @@ This application was developed as part of the group project for the course "Prog
 
 - Python 3.10 or higher
 - pip
-- A free Tankerkönig API key → [register here](https://creativecommons.tankerkoenig.de/)
-- A free Mapbox access token → [register here](https://account.mapbox.com/)
 
 ### Steps (to be taken in Terminal)
 
 1. Clone the repository
    ```
-   git clone https://github.com/[your-repo]/fuelfinder
-   cd fuelfinder
+   git clone https://github.com/Gruppe0809/FuelFinder
+   cd FuelFinder
    ```
 
 2. Create and activate a virtual environment
@@ -53,11 +51,7 @@ This application was developed as part of the group project for the course "Prog
    pip install -r requirements.txt
    ```
 
-4. Set up your API keys — create a `.env` file in the project root:
-   ```
-   TANKERKOENIG_API_KEY=your_tankerkoenig_key_here
-   MAPBOX_TOKEN=your_mapbox_token_here
-   ```
+> **Note:** API keys are already included in the `.env` file — no additional setup required.
 
 ## Running the App
 
@@ -96,7 +90,7 @@ FuelFinder/
 ├── main.py              # Streamlit app — all logic and UI
 ├── config.py            # Shared constants (radius defaults, API URLs, corridor settings)
 ├── requirements.txt     # Python dependencies
-├── .env                 # API keys (not committed to git)
+├── .env                 # API keys (included in repository)
 └── .streamlit/
     └── config.toml      # Dark theme, primary colour, font settings
 ```
