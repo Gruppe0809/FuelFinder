@@ -105,9 +105,9 @@ With a 50 L tank, 10 L of starting fuel, and 7 L/100 km consumption:
 
 ### Steps (to be taken in Terminal)
 
-1. Set [the folder where you want to store the files] and clone the repository
+1. Set the folder where you want to store the files and clone the repository
    ```
-   cd [/Users/your-folder/path]
+   cd /YOUR/FOLDER/HERE
    git clone https://github.com/Gruppe0809/FuelFinder
    cd FuelFinder
    ```
