@@ -1049,13 +1049,20 @@ def stations_along_route(
     # fill in the average price of all priced stations so they can still be used
     # by the optimiser - better than skipping them entirely and creating gaps in the route
     priced = [s["price"] for s in found if s["price"] is not None]
-    avg_price = sum(priced) / len(priced) if priced else 1.80  # fallback to 1.80 if no prices at all
-    for s in found:
-        if s["price"] is None:
-            s["price"] = avg_price
-            s["price_estimated"] = True  # mark it so we can show a note on the map popup
-        else:
+    if priced:
+        avg_price = sum(priced) / len(priced)
+        for s in found:
+            if s["price"] is None:
+                s["price"] = avg_price
+                s["price_estimated"] = True  # mark it so we can show a note on the map popup
+            else:
+                s["price_estimated"] = False
+    else:
+        # no real price data at all along this route (e.g. an intra-Swiss trip)
+        # we can't estimate anything meaningful, so leave prices as None and flag it
+        for s in found:
             s["price_estimated"] = False
+        warnings.append("__no_prices__")
 
     # sort stations by their position along the route (so we process them in driving order)
     found.sort(key=lambda s: s["route_km"])
@@ -1590,15 +1597,23 @@ def render_dynamic_mode() -> None:
         )
         progress_bar.empty()  # remove the progress bar once done
 
-        # step 3: run the greedy algorithm to find the cheapest combination of stops
-        with st.spinner("Optimising refuel stops..."):
-            plan = plan_trip(
-                stations=corridor_stations,
-                total_distance_km=route.total_km,
-                tank_capacity_l=tank_capacity,
-                current_fuel_l=current_fuel,
-                consumption_l_per_100km=consumption,
-            )
+        # check if we have any real price data along the route
+        has_prices = "__no_prices__" not in corridor_warnings
+
+        if has_prices:
+            # step 3: run the greedy algorithm to find the cheapest combination of stops
+            with st.spinner("Optimising refuel stops..."):
+                plan = plan_trip(
+                    stations=corridor_stations,
+                    total_distance_km=route.total_km,
+                    tank_capacity_l=tank_capacity,
+                    current_fuel_l=current_fuel,
+                    consumption_l_per_100km=consumption,
+                )
+        else:
+            # no price data - create an empty plan so we can still show the map
+            plan = TripPlan(stops=[], total_cost=0.0, total_distance_km=route.total_km,
+                            fuel_remaining_l=current_fuel, feasible=True)
 
         # save everything to session_state so results persist across Streamlit reruns
         st.session_state.trip_result = {
@@ -1607,6 +1622,7 @@ def render_dynamic_mode() -> None:
             "route":             route,
             "corridor_stations": corridor_stations,
             "corridor_warnings": corridor_warnings,
+            "has_prices":        has_prices,
             "plan":              plan,
             "fuel_type":         fuel_type,
             "consumption":       consumption,
@@ -1629,58 +1645,95 @@ def render_dynamic_mode() -> None:
     route             = tr["route"]
     fuel_type_used    = tr["fuel_type"]
     corridor_stations = tr["corridor_stations"]
+    has_prices        = tr.get("has_prices", True)
 
     st.success(f"  {tr['start'].address}  ->  {tr['end'].address}")
 
-    if tr["corridor_warnings"]:
-        with st.expander(f"  {len(tr['corridor_warnings'])} warning(s)"):
-            for w in tr["corridor_warnings"]:
+    # show any non-internal warnings in a collapsible section
+    # (filter out "__no_prices__" which is an internal flag, not a user-facing message)
+    user_warnings = [w for w in tr["corridor_warnings"] if not w.startswith("__")]
+    if user_warnings:
+        with st.expander(f"  {len(user_warnings)} warning(s)"):
+            for w in user_warnings:
                 st.write(f"- {w}")
+
+    # if there's no price data at all, show a disclaimer and just display the map
+    if not has_prices:
+        st.warning(
+            "No live fuel price data was found along this route. "
+            "This can happen for routes entirely within Switzerland, which has no public price database. "
+            "The map below shows fuel station locations so you know where to stop, "
+            "but cost optimisation is not possible without price data."
+        )
+        st.markdown('<div class="ff-section">Station locations along route</div>', unsafe_allow_html=True)
+        fmap = build_trip_map(route, corridor_stations, plan, fuel_type_used)
+        st_folium(fmap, height=460, width='stretch', returned_objects=[])
+        st.caption(f"Grey dot = fuel station | {len(corridor_stations)} stations found along the route")
+        return
 
     if not plan.feasible:
         st.error(f"Trip not feasible: {plan.message}")
         return
 
-    # calculate a "baseline cost" to show how much we save vs. just stopping anywhere
-    # baseline = how much you'd spend buying fuel at the average price of all corridor stations
+    # calculate metrics for the summary cards
+    # total litres the car needs to refuel (route consumption minus what's already in the tank)
     fuel_needed_total = max(0.0, route.total_km * tr["consumption"] / 100.0 - tr["current_fuel"])
-    if corridor_stations:
-        avg_price     = sum(s["price"] for s in corridor_stations) / len(corridor_stations)
+    total_liters_bought = sum(s.liters for s in plan.stops)
+
+    # corridor average = mean price of all stations found along the route
+    # used as a baseline to show how much the optimiser saves vs. stopping anywhere
+    real_priced = [s["price"] for s in corridor_stations if not s.get("price_estimated")]
+    if real_priced:
+        avg_price     = sum(real_priced) / len(real_priced)
         baseline_cost = fuel_needed_total * avg_price
     else:
         avg_price     = 0.0
         baseline_cost = 0.0
 
-    # display the four summary metric cards at the top
-    metrics = st.columns(4)
-    metrics[0].metric("Distance",        f"{route.total_km:,.0f} km")
-    metrics[1].metric("Total fuel cost",  f"EUR{plan.total_cost:,.2f}")
-    metrics[2].metric("Refuel stops",    f"{len(plan.stops)}")
+    # display five summary metric cards
+    metrics = st.columns(5)
+    metrics[0].metric("Distance",          f"{route.total_km:,.0f} km")
+    metrics[1].metric("Total fuel cost",   f"EUR {plan.total_cost:,.2f}")
+    metrics[2].metric("Fuel to buy",       f"{total_liters_bought:.1f} L")
+    metrics[3].metric("Refuel stops",      f"{len(plan.stops)}")
     if avg_price > 0:
         savings = baseline_cost - plan.total_cost
-        metrics[3].metric(
+        metrics[4].metric(
             "vs. corridor average",
-            f"EUR{plan.total_cost:,.2f}",
-            delta=f"-EUR{savings:,.2f}" if savings >= 0 else f"+EUR{-savings:,.2f}",
-            delta_color="inverse",  # "inverse" means green for negative (saving money is good)
+            f"EUR {plan.total_cost:,.2f}",
+            delta=f"-EUR {savings:,.2f}" if savings >= 0 else f"+EUR {-savings:,.2f}",
+            delta_color="inverse",  # green for negative delta (saving money is good)
+            help=(
+                f"Corridor average: EUR {avg_price:.3f}/L — "
+                "the mean price of all stations found along the route. "
+                "This is what you'd pay on average if you stopped at a random station. "
+                "The optimiser picks the cheapest combination to beat this baseline."
+            ),
         )
     else:
-        metrics[3].metric("vs. average", "-")
+        metrics[4].metric("vs. average", "-")
+
+    # show the average corridor price as a small caption below the metrics
+    if avg_price > 0:
+        st.caption(
+            f"Corridor average: **EUR {avg_price:.3f}/L** · "
+            f"Total fuel needed over route: **{fuel_needed_total:.1f} L** "
+            f"({route.total_km:.0f} km × {tr['consumption']} L/100km − {tr['current_fuel']:.0f} L already in tank)"
+        )
 
     # --- ROUTE MAP ---
     st.markdown('<div class="ff-section">Route and refuel stops</div>', unsafe_allow_html=True)
     fmap = build_trip_map(route, corridor_stations, plan, fuel_type_used)
     st_folium(fmap, height=460, width='stretch', returned_objects=[])
     st.caption(
-        f"Green pin = chosen refuel stop | Grey dot = other priced station in corridor | "
-        f"{len(corridor_stations)} priced stations along the route"
+        f"Green pin = chosen refuel stop | Grey dot = other station in corridor | "
+        f"{len(corridor_stations)} stations along the route"
     )
 
     # --- REFUEL PLAN TABLE ---
     if plan.stops:
         st.markdown('<div class="ff-section">Refuel plan</div>', unsafe_allow_html=True)
         rows = []
-        # build a list of dicts, one per stop, for the table
         for n, stop in enumerate(plan.stops, start=1):
             s = stop.station
             rows.append({
