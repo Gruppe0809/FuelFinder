@@ -25,6 +25,8 @@ All results are merged into a single sorted list. The map shows each station as 
 - **Red** = most expensive third
 - **Grey** = no price data available
 
+Clicking any marker opens a popup with the station name, brand, price, and an **"Open in Google Maps"** link that takes you directly to that location in Google Maps.
+
 ### Mode 2 — Trip Planner
 
 The user enters a start location, a destination, and their vehicle's fuel parameters (tank size, current fuel level, fuel consumption in L/100 km). The app then runs a multi-step process:
@@ -40,6 +42,8 @@ The user enters a start location, a destination, and their vehicle's fuel parame
 5. **Cost optimisation** — when at least some price data is available, the app runs the greedy refuel planning algorithm (see below) to decide exactly where to stop and how many litres to buy at each stop.
 
 6. **Results** — the route map shows the full driving path, green pins for chosen refuel stops, and grey dots for all other stations that were found. A summary shows total cost, litres to buy, number of stops, and a comparison of the **average price you actually paid per litre** against the corridor average (the mean price of all stations found along the route). A table below lists each stop with the price, litres purchased, and cost.
+
+7. **Google Maps integration** — every station popup on the map includes an "Open in Google Maps" link for that specific location. Below the route map, an **"Open route in Google Maps"** button opens the full planned trip in Google Maps with all recommended refuel stops already added as waypoints, so the user can follow turn-by-turn navigation directly.
 
 ---
 
@@ -165,6 +169,12 @@ streamlit run main.py
 ```
 
 The app opens automatically at `http://localhost:8501`.
+
+---
+
+## Warnings and Known Limitations
+
+If the app displays a warning message (e.g. "Switzerland unavailable", "Austria unavailable", or a timeout error), this is almost always caused by a temporary issue with one of the external APIs — for example, the Overpass API rate-limiting requests or a short server outage. **This is outside our control.** Simply waiting a minute and trying again usually resolves it. The app is designed to continue working with the data it does receive, so a warning from one country does not prevent results from the other two from showing.
 
 ---
 
