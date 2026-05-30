@@ -1354,13 +1354,17 @@ def build_map(stations: list[dict], origin_lat: float, origin_lon: float,
         else:
             color, price_str = "red", f"{s['price']:.3f}"     # expensive
 
+        # build Google Maps link for this station
+        gmaps_url = f"https://www.google.com/maps/search/?api=1&query={s['lat']},{s['lon']}"
+
         # this HTML string shows up in a popup when the user clicks on the marker
         popup_html = (
             f"<b>{s['name']}</b><br>"
             f"Brand: {s['brand'] or '-'}<br>"
             f"{fuel_type}: <b>{price_str}</b><br>"
             f"Distance: {s['distance_km']:.1f} km<br>"
-            f"Country: {s['country']} ({s['source']})"
+            f"Country: {s['country']} ({s['source']})<br>"
+            f"<a href='{gmaps_url}' target='_blank' style='color:#4285F4;font-weight:600;'>Open in Google Maps</a>"
         )
         folium.CircleMarker(
             location=[s["lat"], s["lon"]],
@@ -1413,6 +1417,7 @@ def build_trip_map(route: Route, all_corridor_stations: list[dict],
     for s in all_corridor_stations:
         if (s["lat"], s["lon"]) in chosen_keys:
             continue  # this station is a chosen stop, we'll draw it as a green pin below
+        gmaps_url = f"https://www.google.com/maps/search/?api=1&query={s['lat']},{s['lon']}"
         folium.CircleMarker(
             location=[s["lat"], s["lon"]],
             radius=4,
@@ -1422,7 +1427,8 @@ def build_trip_map(route: Route, all_corridor_stations: list[dict],
                 f"<b>{s['name']}</b><br>"
                 + (f"{fuel_type}: {s['price']:.3f}{'(est.)' if s.get('price_estimated') else ''}<br>"
                    if s.get('price') is not None else "Price: unavailable<br>")
-                + f"At km {s['route_km']:.0f} of route",
+                + f"At km {s['route_km']:.0f} of route<br>"
+                + f"<a href='{gmaps_url}' target='_blank' style='color:#4285F4;font-weight:600;'>Open in Google Maps</a>",
                 max_width=240,
             ),
         ).add_to(fmap)
@@ -1434,13 +1440,15 @@ def build_trip_map(route: Route, all_corridor_stations: list[dict],
             continue  # skip the virtual destination station (it has no real coordinates)
         # show "(est.)" next to the price if it was filled in from the corridor average
         price_label = (f"{s['price']:.3f} (est.)" if s.get("price_estimated") else f"{s['price']:.3f}") if s.get("price") is not None else "unavailable"
+        gmaps_url = f"https://www.google.com/maps/search/?api=1&query={s['lat']},{s['lon']}"
         popup_html = (
             f"<b>Stop {n}: {s['name']}</b><br>"
             f"{fuel_type}: <b>{price_label}</b> / L<br>"
             f"Refuel: <b>{stop.liters:.1f} L</b> "
             f"(EUR{stop.cost:.2f})<br>"
             f"At km {s['route_km']:.0f} of route<br>"
-            f"{s['country']} ({s['source']})"
+            f"{s['country']} ({s['source']})<br>"
+            f"<a href='{gmaps_url}' target='_blank' style='color:#4285F4;font-weight:600;'>Open in Google Maps</a>"
         )
         folium.Marker(
             location=[s["lat"], s["lon"]],
@@ -1450,6 +1458,40 @@ def build_trip_map(route: Route, all_corridor_stations: list[dict],
         ).add_to(fmap)
 
     return fmap
+
+
+# ---------------------------------------------------------------------------
+# Google Maps URL helpers
+# ---------------------------------------------------------------------------
+
+def _gmaps_route_url(route: Route, plan: TripPlan) -> str:
+    """
+    Builds a Google Maps Directions URL for the full route with refuel stops as waypoints.
+    Format: https://www.google.com/maps/dir/?api=1&origin=...&destination=...&waypoints=...
+    """
+    start = route.points[0]   # (lat, lon)
+    end   = route.points[-1]
+
+    origin      = f"{start[0]},{start[1]}"
+    destination = f"{end[0]},{end[1]}"
+
+    # only include stops that have real coordinates (skip the virtual destination station)
+    waypoint_coords = [
+        f"{stop.station['lat']},{stop.station['lon']}"
+        for stop in plan.stops
+        if stop.station.get("lat") is not None
+    ]
+
+    url = (
+        f"https://www.google.com/maps/dir/?api=1"
+        f"&origin={origin}"
+        f"&destination={destination}"
+        f"&travelmode=driving"
+    )
+    if waypoint_coords:
+        url += "&waypoints=" + "|".join(waypoint_coords)
+
+    return url
 
 
 # ---------------------------------------------------------------------------
@@ -1777,6 +1819,12 @@ def render_dynamic_mode() -> None:
             f"Green pin = recommended stop | Grey dot = other station | "
             f"{len(corridor_stations)} stations found along the route"
         )
+        if plan.stops:
+            st.link_button(
+                "Open route in Google Maps",
+                _gmaps_route_url(route, plan),
+                use_container_width=False,
+            )
 
         if plan.stops:
             rows = []
@@ -1852,6 +1900,11 @@ def render_dynamic_mode() -> None:
     st.caption(
         f"Green pin = chosen refuel stop | Grey dot = other station in corridor | "
         f"{len(corridor_stations)} stations along the route"
+    )
+    st.link_button(
+        "Open route in Google Maps",
+        _gmaps_route_url(route, plan),
+        use_container_width=False,
     )
 
     # --- REFUEL PLAN TABLE ---
