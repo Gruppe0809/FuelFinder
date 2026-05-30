@@ -1779,7 +1779,6 @@ def render_dynamic_mode() -> None:
         )
 
         if plan.stops:
-            import pandas as pd
             rows = []
             for n, stop in enumerate(plan.stops, 1):
                 s = stop.station
@@ -1799,47 +1798,50 @@ def render_dynamic_mode() -> None:
 
     # calculate metrics for the summary cards
     # total litres the car needs to refuel (route consumption minus what's already in the tank)
-    fuel_needed_total = max(0.0, route.total_km * tr["consumption"] / 100.0 - tr["current_fuel"])
+    fuel_needed_total   = max(0.0, route.total_km * tr["consumption"] / 100.0 - tr["current_fuel"])
     total_liters_bought = sum(s.liters for s in plan.stops)
 
-    # corridor average = mean price of all stations found along the route
-    # used as a baseline to show how much the optimiser saves vs. stopping anywhere
+    # actual average price paid = total cost divided by total litres bought
+    actual_avg_price = plan.total_cost / total_liters_bought if total_liters_bought > 0 else 0.0
+
+    # corridor average = mean price of all real (non-estimated) stations found along the route
+    # note: this is the unweighted average of all stations on the route, not just the ones we stop at.
+    # it CAN be lower than actual_avg_price when cheap stations are reachable without stopping
+    # (e.g. they're near the start when the tank is already full) — that's not a bug.
     real_priced = [s["price"] for s in corridor_stations if not s.get("price_estimated")]
-    if real_priced:
-        avg_price     = sum(real_priced) / len(real_priced)
-        baseline_cost = fuel_needed_total * avg_price
-    else:
-        avg_price     = 0.0
-        baseline_cost = 0.0
+    avg_price   = sum(real_priced) / len(real_priced) if real_priced else 0.0
 
     # display five summary metric cards
     metrics = st.columns(5)
-    metrics[0].metric("Distance",          f"{route.total_km:,.0f} km")
-    metrics[1].metric("Total fuel cost",   f"EUR {plan.total_cost:,.2f}")
-    metrics[2].metric("Fuel to buy",       f"{total_liters_bought:.1f} L")
-    metrics[3].metric("Refuel stops",      f"{len(plan.stops)}")
-    if avg_price > 0:
-        savings = baseline_cost - plan.total_cost
+    metrics[0].metric("Distance",        f"{route.total_km:,.0f} km")
+    metrics[1].metric("Total fuel cost", f"EUR {plan.total_cost:,.2f}")
+    metrics[2].metric("Fuel to buy",     f"{total_liters_bought:.1f} L")
+    metrics[3].metric("Refuel stops",    f"{len(plan.stops)}")
+    if avg_price > 0 and actual_avg_price > 0:
+        diff = actual_avg_price - avg_price   # positive = you paid more than average
         metrics[4].metric(
-            "vs. corridor average",
-            f"EUR {plan.total_cost:,.2f}",
-            delta=f"-EUR {savings:,.2f}" if savings >= 0 else f"+EUR {-savings:,.2f}",
-            delta_color="inverse",  # green for negative delta (saving money is good)
+            "Your avg vs corridor avg",
+            f"EUR {actual_avg_price:.3f}/L",
+            delta=f"{diff:+.3f} EUR/L",
+            delta_color="inverse",  # red when positive (paying above average), green when negative
             help=(
-                f"Corridor average: EUR {avg_price:.3f}/L — "
-                "the mean price of all stations found along the route. "
-                "This is what you'd pay on average if you stopped at a random station. "
-                "The optimiser picks the cheapest combination to beat this baseline."
+                "Your avg price = total cost ÷ total litres bought at your stops. "
+                f"Corridor average = EUR {avg_price:.3f}/L (mean of all {len(real_priced)} "
+                "real-price stations found along the route). "
+                "Your avg can be above the corridor average when range constraints force stops "
+                "at expensive stations, or when cheap stations near the start are skipped "
+                "because the tank is already full."
             ),
         )
     else:
-        metrics[4].metric("vs. average", "-")
+        metrics[4].metric("Avg price paid", f"EUR {actual_avg_price:.3f}/L" if actual_avg_price > 0 else "-")
 
-    # show the average corridor price as a small caption below the metrics
+    # caption: corridor average and total fuel calculation
     if avg_price > 0:
         st.caption(
             f"Corridor average: **EUR {avg_price:.3f}/L** · "
-            f"Total fuel needed over route: **{fuel_needed_total:.1f} L** "
+            f"Your avg paid: **EUR {actual_avg_price:.3f}/L** · "
+            f"Total fuel needed: **{fuel_needed_total:.1f} L** "
             f"({route.total_km:.0f} km × {tr['consumption']} L/100km − {tr['current_fuel']:.0f} L already in tank)"
         )
 
