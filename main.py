@@ -906,6 +906,55 @@ def get_route(start_lat: float, start_lon: float,
     return Route(points=points, total_km=route["distance"] / 1000.0)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_route_via_stops(
+    start_lat: float, start_lon: float,
+    end_lat: float, end_lon: float,
+    stop_coords: tuple,  # tuple of (lat, lon) pairs for each chosen refuel stop
+) -> Optional[Route]:
+    """
+    Same as get_route() but inserts the chosen refuel stops as intermediate waypoints.
+    This means the returned route actually drives to each station, so the map shows
+    the real path including any detours off the highway to reach a station.
+    Falls back to the original route if the re-fetch fails.
+    """
+    token = get_mapbox_token()
+
+    # build the full coordinate list: start, then each stop, then destination
+    # Mapbox and OSRM both accept multiple waypoints separated by semicolons
+    # remember: the API expects lon,lat (not lat,lon like everywhere else in this code)
+    all_points = [(start_lon, start_lat)]
+    for lat, lon in stop_coords:
+        all_points.append((lon, lat))
+    all_points.append((end_lon, end_lat))
+
+    coords_str = ";".join(f"{lon},{lat}" for lon, lat in all_points)
+
+    if token:
+        url    = f"{MAPBOX_DIRECTIONS_URL}/{coords_str}"
+        params = {"geometries": "geojson", "overview": "full", "access_token": token}
+    else:
+        url    = f"{OSRM_URL}/{coords_str}"
+        params = {"overview": "full", "geometries": "geojson"}
+
+    try:
+        resp = requests.get(url, params=params, timeout=20,
+                            headers={"User-Agent": USER_AGENT})
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException:
+        return None
+
+    routes = data.get("routes", [])
+    if not routes:
+        return None
+
+    route = routes[0]
+    # swap from [lon, lat] GeoJSON order back to (lat, lon) as used everywhere else
+    points = [(c[1], c[0]) for c in route["geometry"]["coordinates"]]
+    return Route(points=points, total_km=route["distance"] / 1000.0)
+
+
 # ---------------------------------------------------------------------------
 # Route geometry helper functions
 # ---------------------------------------------------------------------------
@@ -1759,11 +1808,27 @@ def render_dynamic_mode() -> None:
                     consumption_l_per_100km=consumption,
                 )
 
+        # re-fetch the route with the chosen stops as actual waypoints so the map
+        # shows the route physically going to each station (including any off-highway detours)
+        # we pass stop coords as a tuple so the result can be cached by Streamlit
+        stop_coords = tuple(
+            (s.station["lat"], s.station["lon"])
+            for s in plan.stops
+            if s.station.get("lat") is not None
+        )
+        with st.spinner("Building route via stops..."):
+            display_route = get_route_via_stops(
+                route.points[0][0], route.points[0][1],
+                route.points[-1][0], route.points[-1][1],
+                stop_coords,
+            ) or route  # fall back to the original route if the re-fetch fails
+
         # save everything to session_state so results persist across Streamlit reruns
         st.session_state.trip_result = {
             "start":             start,
             "end":               end,
-            "route":             route,
+            "route":             route,          # original A→B route used for metrics
+            "display_route":     display_route,  # route via stops used for map display
             "corridor_stations": corridor_stations,
             "corridor_warnings": corridor_warnings,
             "has_prices":        has_prices,
@@ -1786,7 +1851,8 @@ def render_dynamic_mode() -> None:
 
     # unpack the saved results
     plan              = tr["plan"]
-    route             = tr["route"]
+    route             = tr["route"]          # original route - used for distance/fuel metrics
+    display_route     = tr.get("display_route", route)  # route via stops - used for map display
     fuel_type_used    = tr["fuel_type"]
     corridor_stations = tr["corridor_stations"]
     has_prices        = tr.get("has_prices", True)
@@ -1821,7 +1887,7 @@ def render_dynamic_mode() -> None:
         c3.metric("Refuel stops", str(len(plan.stops)))
 
         st.markdown('<div class="ff-section">Recommended stops (range-based)</div>', unsafe_allow_html=True)
-        fmap = build_trip_map(route, corridor_stations, plan, fuel_type_used)
+        fmap = build_trip_map(display_route, corridor_stations, plan, fuel_type_used)
         st_folium(fmap, height=460, width='stretch', returned_objects=[])
         st.caption(
             f"Green pin = recommended stop | Grey dot = other station | "
@@ -1905,7 +1971,7 @@ def render_dynamic_mode() -> None:
 
     # --- ROUTE MAP ---
     st.markdown('<div class="ff-section">Route and refuel stops</div>', unsafe_allow_html=True)
-    fmap = build_trip_map(route, corridor_stations, plan, fuel_type_used)
+    fmap = build_trip_map(display_route, corridor_stations, plan, fuel_type_used)
     st_folium(fmap, height=460, width='stretch', returned_objects=[])
     st.caption(
         f"Green pin = chosen refuel stop | Grey dot = other station in corridor | "
