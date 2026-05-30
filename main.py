@@ -1223,6 +1223,86 @@ def plan_trip(
     )
 
 
+# ---------------------------------------------------------------------------
+# Range-based stop planner — used when no price data is available (e.g. Switzerland)
+# ---------------------------------------------------------------------------
+
+def plan_trip_no_prices(
+    stations: list[dict],
+    total_distance_km: float,
+    tank_capacity_l: float,
+    current_fuel_l: float,
+    consumption_l_per_100km: float,
+) -> TripPlan:
+    """
+    Plans refuel stops using only range / distance — no prices needed.
+
+    Strategy: always drive to the furthest station reachable on current fuel,
+    fill up to a full tank there, and repeat until the destination is reachable.
+    This gives the minimum number of stops without any cost information.
+    """
+    consumption_per_km = consumption_l_per_100km / 100.0
+    fuel_range_km = tank_capacity_l / consumption_per_km
+
+    if tank_capacity_l <= 0 or consumption_l_per_100km <= 0:
+        return TripPlan([], 0.0, total_distance_km, current_fuel_l, False,
+                        "Tank capacity and consumption must be positive.")
+
+    # only consider stations between start and destination
+    points = sorted(
+        [s for s in stations if 0 < s["route_km"] < total_distance_km],
+        key=lambda s: s["route_km"],
+    )
+
+    pos_km = 0.0
+    fuel_l = current_fuel_l
+    stops: list[RefuelStop] = []
+
+    while True:
+        # how far can we reach from here on current fuel?
+        reach_km = pos_km + fuel_l / consumption_per_km
+
+        # can we already make it to the destination?
+        if reach_km >= total_distance_km - 1e-6:
+            break
+
+        # find all stations reachable on current fuel
+        reachable = [s for s in points if pos_km < s["route_km"] <= reach_km + 1e-6]
+
+        if not reachable:
+            # even a full tank can't reach the next station
+            ahead = [s for s in points if s["route_km"] > pos_km]
+            if not ahead:
+                return TripPlan(stops, 0.0, total_distance_km, fuel_l, False,
+                                "Destination unreachable — no more stations ahead.")
+            next_s = min(ahead, key=lambda s: s["route_km"])
+            gap = next_s["route_km"] - pos_km
+            return TripPlan(stops, 0.0, total_distance_km, fuel_l, False,
+                            f"Gap of {gap:.0f} km to next station exceeds "
+                            f"tank range of {fuel_range_km:.0f} km.")
+
+        # pick the furthest reachable station to minimise the number of stops
+        chosen = max(reachable, key=lambda s: s["route_km"])
+
+        # drive there
+        distance = chosen["route_km"] - pos_km
+        fuel_l  -= distance * consumption_per_km
+        pos_km   = chosen["route_km"]
+
+        # fill up to a full tank (price unknown, so cost = 0)
+        buy    = tank_capacity_l - fuel_l
+        fuel_l = tank_capacity_l
+        stops.append(RefuelStop(station=chosen, liters=buy, cost=0.0))
+
+    return TripPlan(
+        stops=stops,
+        total_cost=0.0,
+        total_distance_km=total_distance_km,
+        fuel_remaining_l=fuel_l,
+        feasible=True,
+    )
+
+
 # ===========================================================================
 # 4. UI — map builders and page renderers
 # ===========================================================================
@@ -1619,9 +1699,15 @@ def render_dynamic_mode() -> None:
                     consumption_l_per_100km=consumption,
                 )
         else:
-            # no price data - create an empty plan so we can still show the map
-            plan = TripPlan(stops=[], total_cost=0.0, total_distance_km=route.total_km,
-                            fuel_remaining_l=current_fuel, feasible=True)
+            # no price data - plan stops based on range only (furthest reachable station each time)
+            with st.spinner("Planning stops based on fuel range..."):
+                plan = plan_trip_no_prices(
+                    stations=corridor_stations,
+                    total_distance_km=route.total_km,
+                    tank_capacity_l=tank_capacity,
+                    current_fuel_l=current_fuel,
+                    consumption_l_per_100km=consumption,
+                )
 
         # save everything to session_state so results persist across Streamlit reruns
         st.session_state.trip_result = {
@@ -1665,18 +1751,46 @@ def render_dynamic_mode() -> None:
             for w in user_warnings:
                 st.write(f"- {w}")
 
-    # if there's no price data at all, show a disclaimer and just display the map
+    # if there's no price data, show range-based stop plan with a disclaimer
     if not has_prices:
         st.warning(
-            "No live fuel price data was found along this route. "
-            "This can happen for routes entirely within Switzerland, which has no public price database. "
-            "The map below shows fuel station locations so you know where to stop, "
-            "but cost optimisation is not possible without price data."
+            "No live fuel price data was found along this route (e.g. intra-Swiss route). "
+            "Stops are planned based on your fuel range — the app picks the furthest reachable "
+            "station each time to minimise the number of stops. Costs cannot be shown without price data."
         )
-        st.markdown('<div class="ff-section">Station locations along route</div>', unsafe_allow_html=True)
+
+        if not plan.feasible:
+            st.error(f"Trip not feasible: {plan.message}")
+            return
+
+        # show summary metrics (no costs, just distance and stops)
+        fuel_needed_total = max(0.0, route.total_km * tr["consumption"] / 100.0 - tr["current_fuel"])
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Distance", f"{route.total_km:.0f} km")
+        c2.metric("Fuel to buy", f"{fuel_needed_total:.1f} L")
+        c3.metric("Refuel stops", str(len(plan.stops)))
+
+        st.markdown('<div class="ff-section">Recommended stops (range-based)</div>', unsafe_allow_html=True)
         fmap = build_trip_map(route, corridor_stations, plan, fuel_type_used)
         st_folium(fmap, height=460, width='stretch', returned_objects=[])
-        st.caption(f"Grey dot = fuel station | {len(corridor_stations)} stations found along the route")
+        st.caption(
+            f"Green pin = recommended stop | Grey dot = other station | "
+            f"{len(corridor_stations)} stations found along the route"
+        )
+
+        if plan.stops:
+            import pandas as pd
+            rows = []
+            for n, stop in enumerate(plan.stops, 1):
+                s = stop.station
+                rows.append({
+                    "Stop": n,
+                    "Station": s.get("name", "Unknown"),
+                    "At km": f"{s['route_km']:.0f}",
+                    "Fill (L)": f"{stop.liters:.1f}",
+                    "Price": "No data",
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         return
 
     if not plan.feasible:
