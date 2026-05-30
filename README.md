@@ -183,7 +183,7 @@ FuelFinder/
 - **Pandas Documentation**: https://pandas.pydata.org/docs/
 - **GeoPy Documentation**: https://geopy.readthedocs.io/
 - **Nominatim / OpenStreetMap**: https://nominatim.org/
-- **Stack Overflow and online resources**: Debugging and best practices reference
+- **ChatGPT, Claude and GitHub Copilot**: Code optimisation, debugging, and README structuring
 
 ---
 
