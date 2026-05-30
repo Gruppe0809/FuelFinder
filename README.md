@@ -35,11 +35,11 @@ The user enters a start location, a destination, and their vehicle's fuel parame
 
 3. **Handling stations without prices** — Switzerland has no public fuel price database, so Swiss stations are returned without a price. If the route passes through a mix of countries, the app calculates the average price of all stations that do have a price (the "corridor average") and uses that as an estimated price for unpriced stations, so the algorithm can still plan the full route. These estimated prices are clearly marked with "(est.)" on the map.
 
-4. **No-prices fallback (intra-Swiss routes)** — if the route is entirely within Switzerland and no station has a real price, cost optimisation is skipped completely. Instead, the app shows the full route on the map with all fuel station locations marked, together with a disclaimer explaining that no price data is available. The user can see exactly where to fill up, even though costs cannot be calculated.
+4. **No-prices fallback (intra-Swiss routes)** — if the route is entirely within Switzerland and no station has a real price, the cost optimiser is skipped. Instead, the app runs a **range-based stop planner**: starting from the current fuel level, it calculates how far the car can travel, finds all stations within that range, picks the **furthest reachable one** (to minimise stops), fills to a full tank there, and repeats until the destination is reachable. The map shows green pins for recommended stops and grey dots for all other stations, with a disclaimer that no cost data is available.
 
-5. **Cost optimisation** — when at least some price data is available, the app runs the refuel planning algorithm (see below) to decide exactly where to stop and how many litres to buy at each stop.
+5. **Cost optimisation** — when at least some price data is available, the app runs the greedy refuel planning algorithm (see below) to decide exactly where to stop and how many litres to buy at each stop.
 
-6. **Results** — the route map shows the full driving path, green pins for chosen refuel stops, and grey dots for all other stations that were found. A summary shows total cost, litres to buy, number of stops, and how the planned cost compares to the corridor average price. A table below lists each stop with the price, litres purchased, and cost.
+6. **Results** — the route map shows the full driving path, green pins for chosen refuel stops, and grey dots for all other stations that were found. A summary shows total cost, litres to buy, number of stops, and a comparison of the **average price you actually paid per litre** against the corridor average (the mean price of all stations found along the route). A table below lists each stop with the price, litres purchased, and cost.
 
 ---
 
@@ -71,7 +71,28 @@ Not all stations return a price — Swiss stations never do, and Austrian statio
 
 1. **Corridor average fill-in** — if at least one station on the route has a real price, the app calculates the average of those prices and uses it as an estimate for any station that has no price. These estimated prices are labelled "(est.)" on the map so the user knows they are not real values.
 
-2. **No-prices fallback** — if the route is entirely within Switzerland (or another area with no price data), there are no real prices at all, so using a made-up average would be meaningless. In this case the algorithm is skipped entirely. The app instead shows all station locations on the map with a disclaimer, letting the user know where fuel is available but that cost optimisation was not possible.
+2. **No-prices fallback** — if the route is entirely within Switzerland (or another area with no price data), there are no real prices at all, so using a made-up average would be meaningless. In this case the greedy algorithm is skipped entirely and the range-based planner runs instead (see Step 4 above).
+
+### Range-based stop planner (no-price routes)
+
+When no price data is available, a simpler algorithm runs that plans stops purely based on how far the car can travel:
+
+1. Calculate the maximum distance reachable on the current fuel level.
+2. Find all fuel stations within that distance along the route.
+3. Pick the **furthest reachable station** — stopping as late as possible minimises the total number of stops.
+4. Fill up to a full tank at that station.
+5. Repeat from the new position until the destination is reachable.
+
+This gives the user a practical plan (where to stop and roughly how much to fill) even when prices are unknown.
+
+### The corridor average and your average price paid
+
+After a trip is planned, the results show two price figures:
+
+- **Corridor average** — the unweighted mean price of every real-price station found along the route. This represents the "random stop" baseline.
+- **Your average price paid** — total cost ÷ total litres bought at the chosen stops.
+
+It is possible for the corridor average to be **lower** than your actual average paid. This is not a bug. It happens when cheap stations are clustered near the start of the route where the tank is already full, so the car drives past them without stopping. Those cheap stations still pull the corridor average down, but they do not reduce the actual cost because no fuel was purchased there. The algorithm is still optimal — it picks the cheapest stops given the actual fuel level at each point on the route.
 
 ### Feasibility check
 
