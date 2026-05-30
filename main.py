@@ -87,6 +87,13 @@ html, body, [class*="css"] {
     padding: 2rem 1.5rem !important;
 }
 
+/* hide the sidebar collapse/expand toggle button */
+[data-testid="collapsedControl"],
+button[kind="header"][aria-label="Close sidebar"],
+section[data-testid="stSidebar"] > div > button {
+    display: none !important;
+}
+
 /* orange gradient for the Search / Plan trip buttons */
 .stButton > button[kind="primary"] {
     background: linear-gradient(135deg, #F97316 0%, #DC6309 100%) !important;
@@ -1777,6 +1784,7 @@ def main() -> None:
         page_title="FuelFinder - DACH fuel prices",
         page_icon="",
         layout="wide",  # "wide" uses the full browser width instead of the narrow default
+        initial_sidebar_state="expanded",  # sidebar always open, no collapse button
     )
 
     # inject the custom CSS (defined at the top of the file) into the page HTML
