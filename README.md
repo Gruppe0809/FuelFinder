@@ -31,11 +31,15 @@ The user enters a start location, a destination, and their vehicle's fuel parame
 
 1. **Route calculation** — fetches a real driving route from Mapbox Directions (or OSRM as a fallback). The route is a sequence of GPS waypoints covering the full road path.
 
-2. **Station search along the route** — the route is divided into evenly-spaced sample points (every ~20 km). At each sample point, all three country APIs are called in parallel to find nearby stations. Any station further than 5 km from the route line is discarded. Duplicates (the same station appearing near multiple sample points) are removed. The result is a list of all priced stations along the corridor, sorted in driving order.
+2. **Station search along the route** — the route is divided into evenly-spaced sample points (every ~20 km). At each sample point, all three country APIs are called in parallel to find nearby stations. Any station further than 5 km from the route line is discarded. Duplicates (the same station appearing near multiple sample points) are removed. The result is a list of all stations along the corridor, sorted in driving order.
 
-3. **Cost optimisation** — the app runs the refuel planning algorithm (see below) to decide exactly where to stop and how many litres to buy at each stop.
+3. **Handling stations without prices** — Switzerland has no public fuel price database, so Swiss stations are returned without a price. If the route passes through a mix of countries, the app calculates the average price of all stations that do have a price (the "corridor average") and uses that as an estimated price for unpriced stations, so the algorithm can still plan the full route. These estimated prices are clearly marked with "(est.)" on the map.
 
-4. **Results** — the route map shows the full driving path, green pins for chosen refuel stops, and grey dots for all other stations that were found. A table below lists each stop with the price, litres purchased, and cost.
+4. **No-prices fallback (intra-Swiss routes)** — if the route is entirely within Switzerland and no station has a real price, cost optimisation is skipped completely. Instead, the app shows the full route on the map with all fuel station locations marked, together with a disclaimer explaining that no price data is available. The user can see exactly where to fill up, even though costs cannot be calculated.
+
+5. **Cost optimisation** — when at least some price data is available, the app runs the refuel planning algorithm (see below) to decide exactly where to stop and how many litres to buy at each stop.
+
+6. **Results** — the route map shows the full driving path, green pins for chosen refuel stops, and grey dots for all other stations that were found. A summary shows total cost, litres to buy, number of stops, and how the planned cost compares to the corridor average price. A table below lists each stop with the price, litres purchased, and cost.
 
 ---
 
@@ -60,6 +64,14 @@ The destination is added as a virtual station with a price of €0/L. This means
 ### Minimum fill-up rule
 
 A practical constraint is added on top of the algorithm: **each stop must purchase at least 10 litres**. Without this limit, the algorithm might suggest stopping for 1–3 litres just to save a few cents, which is not realistic. If the calculated amount to buy is less than 10 L, it is rounded up to 10 L (or however much fits in the tank, whichever is smaller).
+
+### Handling stations without a known price
+
+Not all stations return a price — Swiss stations never do, and Austrian stations may be missing a price outside the three official reporting windows (12:00, 14:00, 16:00). The algorithm needs a price for every station to make comparisons, so the app handles this in two steps:
+
+1. **Corridor average fill-in** — if at least one station on the route has a real price, the app calculates the average of those prices and uses it as an estimate for any station that has no price. These estimated prices are labelled "(est.)" on the map so the user knows they are not real values.
+
+2. **No-prices fallback** — if the route is entirely within Switzerland (or another area with no price data), there are no real prices at all, so using a made-up average would be meaningless. In this case the algorithm is skipped entirely. The app instead shows all station locations on the map with a disclaimer, letting the user know where fuel is available but that cost optimisation was not possible.
 
 ### Feasibility check
 
