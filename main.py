@@ -1339,9 +1339,10 @@ def build_trip_map(route: Route, all_corridor_stations: list[dict],
             color="#9a948c",
             fill=True, fill_opacity=0.4, weight=0,
             popup=folium.Popup(
-                f"<b>{s['name']}</b><br>{fuel_type}: {s['price']:.3f}"
-                f"{'(est.)' if s.get('price_estimated') else ''}<br>"
-                f"At km {s['route_km']:.0f} of route",
+                f"<b>{s['name']}</b><br>"
+                + (f"{fuel_type}: {s['price']:.3f}{'(est.)' if s.get('price_estimated') else ''}<br>"
+                   if s.get('price') is not None else "Price: unavailable<br>")
+                + f"At km {s['route_km']:.0f} of route",
                 max_width=240,
             ),
         ).add_to(fmap)
@@ -1352,7 +1353,7 @@ def build_trip_map(route: Route, all_corridor_stations: list[dict],
         if s["lat"] is None:
             continue  # skip the virtual destination station (it has no real coordinates)
         # show "(est.)" next to the price if it was filled in from the corridor average
-        price_label = f"{s['price']:.3f} (est.)" if s.get("price_estimated") else f"{s['price']:.3f}"
+        price_label = (f"{s['price']:.3f} (est.)" if s.get("price_estimated") else f"{s['price']:.3f}") if s.get("price") is not None else "unavailable"
         popup_html = (
             f"<b>Stop {n}: {s['name']}</b><br>"
             f"{fuel_type}: <b>{price_label}</b> / L<br>"
