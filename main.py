@@ -1023,10 +1023,6 @@ def stations_along_route(
                 warnings.append(w)
 
         for s in result.stations:
-            # we need a price to compare stations - skip if there's no price
-            if s["price"] is None:
-                continue
-
             # deduplicate: if we've already added this station (from a nearby sample point),
             # skip it. We round to 4 decimal places which is about 11 metres of precision.
             key = (round(s["lat"], 4), round(s["lon"], 4))
@@ -1048,6 +1044,18 @@ def stations_along_route(
             enriched["route_km"]   = route_km    # km from start where you'd stop
             enriched["offroad_km"] = offroad_km  # km off the main road
             found.append(enriched)
+
+    # some stations (mostly Swiss) have no price data
+    # fill in the average price of all priced stations so they can still be used
+    # by the optimiser - better than skipping them entirely and creating gaps in the route
+    priced = [s["price"] for s in found if s["price"] is not None]
+    avg_price = sum(priced) / len(priced) if priced else 1.80  # fallback to 1.80 if no prices at all
+    for s in found:
+        if s["price"] is None:
+            s["price"] = avg_price
+            s["price_estimated"] = True  # mark it so we can show a note on the map popup
+        else:
+            s["price_estimated"] = False
 
     # sort stations by their position along the route (so we process them in driving order)
     found.sort(key=lambda s: s["route_km"])
@@ -1317,7 +1325,8 @@ def build_trip_map(route: Route, all_corridor_stations: list[dict],
             color="#9a948c",
             fill=True, fill_opacity=0.4, weight=0,
             popup=folium.Popup(
-                f"<b>{s['name']}</b><br>{fuel_type}: {s['price']:.3f}<br>"
+                f"<b>{s['name']}</b><br>{fuel_type}: {s['price']:.3f}"
+                f"{'(est.)' if s.get('price_estimated') else ''}<br>"
                 f"At km {s['route_km']:.0f} of route",
                 max_width=240,
             ),
@@ -1328,9 +1337,11 @@ def build_trip_map(route: Route, all_corridor_stations: list[dict],
         s = stop.station
         if s["lat"] is None:
             continue  # skip the virtual destination station (it has no real coordinates)
+        # show "(est.)" next to the price if it was filled in from the corridor average
+        price_label = f"{s['price']:.3f} (est.)" if s.get("price_estimated") else f"{s['price']:.3f}"
         popup_html = (
             f"<b>Stop {n}: {s['name']}</b><br>"
-            f"{fuel_type}: <b>{s['price']:.3f}</b> / L<br>"
+            f"{fuel_type}: <b>{price_label}</b> / L<br>"
             f"Refuel: <b>{stop.liters:.1f} L</b> "
             f"(EUR{stop.cost:.2f})<br>"
             f"At km {s['route_km']:.0f} of route<br>"
