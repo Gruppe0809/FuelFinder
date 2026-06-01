@@ -14,6 +14,7 @@ Recent geopolitcal events, most notably the escalation of conflict in Iran in ea
 For drivers in the DACH region, the result is sharply higher pump prices and a much wider gap between cheap and expensive stations: often 15–30 cents per litre between neighbouring forecourts, and considerably more between Autobahn service areas and rural stations, or across the German, Austrian, and Swiss borders. A weekly commuter filling a 50 L tank can easily spend several hundred euros more per year than necessary just by stopping at the wrong station.
 
 *FuelFinder addresses this gap: it shows live prices around any location in Germany, Austria, and Switzerland in one view, and computes cost-optimal refuel stops for trips between any two points across the region.*
+
 ---
 
 ## What the App Does
