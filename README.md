@@ -9,7 +9,7 @@ This application was developed as part of the group project for the course "Prog
 
 ## Motivation
 
-Recent geopolitcal events, most notably the escalation of conflict in Iran in early 2026, have been disrupting oil prices. Brent crude crossed $100 per barrel for the first time since 2022, and retail fuel costs jumped across Europe between February and May, with diesel rising faster than petrol. Even after the spring ceasefire, analysts expect the supply effects to persist for years.
+Recent geopolitcal events, most notably the escalation of the conflict in Iran in early 2026, have been disrupting oil prices. Brent crude crossed $100 per barrel for the first time since 2022, and retail fuel costs jumped across Europe between February and May, with diesel rising faster than petrol.
 
 For drivers in the DACH region, the result is sharply higher pump prices and a much wider gap between cheap and expensive stations: often 15–30 cents per litre between neighbouring forecourts, and considerably more between Autobahn service areas and rural stations, or across the German, Austrian, and Swiss borders. A weekly commuter filling a 50 L tank can easily spend several hundred euros more per year than necessary just by stopping at the wrong station.
 
