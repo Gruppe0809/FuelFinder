@@ -9,11 +9,11 @@ This application was developed as part of the group project for the course "Prog
 
 ## Motivation
 
-Recent geopolitcal events, most notably the escalation of the conflict in Iran in early 2026, have been disrupting oil prices. Brent crude crossed $100 per barrel for the first time since 2022, and retail fuel costs jumped across Europe between February and May, with diesel rising faster than petrol.
+Recent geopolitical turmoil — most notably the escalation of the Iran conflict in early 2026 — has pushed oil prices sharply higher. Brent crude crossed $100 a barrel for the first time since 2022, and European pump prices climbed steadily from February through May, with diesel outpacing petrol.
 
-For drivers in the DACH region, the result is sharply higher pump prices and a much wider gap between cheap and expensive stations: often 15–30 cents per litre between neighbouring forecourts, and considerably more between Autobahn service areas and rural stations, or across the German, Austrian, and Swiss borders. A weekly commuter filling a 50 L tank can easily spend several hundred euros more per year than necessary just by stopping at the wrong station.
+For DACH drivers, this means a much wider gap between cheap and expensive stations: 15–30 cents per litre between neighbouring forecourts is now routine, and the spread is far larger between Autobahn service areas and rural stations, or across borders. A weekly commuter with a 50 L tank can easily waste several hundred euros a year by stopping at the wrong one.
 
-*FuelFinder addresses this gap: it shows live prices around any location in Germany, Austria, and Switzerland in one view, and computes cost-optimal refuel stops for trips between any two points across the region.*
+*FuelFinder closes the gap: live prices across Germany, Austria, and Switzerland in one view, and cost-optimal refuel stops for any trip across the region.*
 
 ---
 
