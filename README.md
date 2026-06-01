@@ -9,7 +9,7 @@ This application was developed as part of the group project for the course "Prog
 
 ## Motivation
 
-Recent geopolitical turmoil — most notably the escalation of the Iran conflict in early 2026 — has pushed oil prices sharply higher. Brent crude crossed $100 a barrel for the first time since 2022, and European pump prices climbed steadily from February through May, with diesel outpacing petrol.
+Recent geopolitical turmoil, most notably the escalation of the Iran conflict in early 2026, has pushed oil prices sharply higher. Brent crude crossed $100 a barrel for the first time since 2022, and European pump prices climbed steadily from February through May, with diesel outpacing petrol.
 
 For DACH drivers, this means a much wider gap between cheap and expensive stations: 15–30 cents per litre between neighbouring forecourts is now routine, and the spread is far larger between Autobahn service areas and rural stations, or across borders. A weekly commuter with a 50 L tank can easily waste several hundred euros a year by stopping at the wrong one.
 
