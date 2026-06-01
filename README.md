@@ -192,7 +192,7 @@ If the app displays a warning message (e.g. "Switzerland unavailable", "Austria 
 |---|---|---|---|
 | Tankerkönig | DE | Yes | Requires free API key; radius capped at 25 km |
 | Spritpreisrechner.at | AT | Yes | No key needed; prices may be empty outside 12:00/14:00/16:00 reporting windows |
-| OpenStreetMap Overpass | CH | Locations only | No public Swiss price database |
+| OpenStreetMap Overpass | CH | Locations only | No public Swiss price database as Switzerland has no mandatory fuel-price reporting law, unlike Germany and Austria |
 
 ---
 
